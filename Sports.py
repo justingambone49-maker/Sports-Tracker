@@ -1,5 +1,5 @@
 """
-Sports Score Tracker — v22
+Sports Score Tracker — v24
 ─────────────────────────────────────────────────────────────────────────────
 
 WHAT THIS CODE DOES:
@@ -26,6 +26,32 @@ WHAT THIS CODE DOES:
 
 VERSION HISTORY  (V1–V17 were not written down at the time; they are reconstructed from how the app grew)
 ─────────────────────────────────────────────────────────────────────────────
+V24  ∙ NOTIFICATIONS   — favorite-team alerts are notifications only (no tracker tab); the stats ride inside the alert; no overturned-score alerts in basketball;
+                        penalty shootouts shown on every score: 1 (5) – 1 (3), and a shootout decides W / L; OBS overlay window (mirrors every
+                        notification on a keyable background); the green dot can be hidden completely
+     ∙ FINAL PAGE      — favorites first, then in the order the games finished
+     ∙ BASKETBALL      — a score-margin chart (0 in the middle, periods marked) instead of a wall of baskets
+     ∙ STATS           — no decimals or "Own ..." in names; free soccer player stats / leaders / past rosters from ESPN's core API; box score from player
+                        data when ESPN's summary has none; the whole play-by-play (the old 80-play limit was saved in the settings)
+     ∙ PAST SEASONS    — a past team page shows that year's record
+     ∙ SEARCH          — Teams tab: find any team in any tracked league, open its stats, track it
+     ∙ FORMULA 1       — Drivers' and Constructors' championships in Standings (any season); Events tab with every round of any season and
+                        month browsing for other series; click a Grand Prix for the circuit, schedule, result and every past winner
+     ∙ SPEED / LAYOUT  — pages fetch their pieces at the same time (team page, game window, standings, season page shows a week first);
+                        header buttons and crowded toolbars get their own line so nothing overlaps
+V23  ∙ ENDED GAMES      — a live game ESPN forgot to end is ended: as soon as ESPN's own summary or an "End of Game" play says it is over (with
+                        the real final score from the summary), or after 30 minutes with no change at all (shown FINAL*); long pauses such as
+                        halftime and weather delays get extra time first
+     ∙ PLAY-BY-PLAY    — no limit: loads from the very first play (ESPN's full play list is used when the game summary only has part of it);
+                        college basketball is shown in halves; no basket-by-basket alerts in any basketball league
+     ∙ PLAYER LEADERS  — new Leaders tab: pick a league, season, category and stat (NFL passing yards ...); click a player for the full page
+     ∙ PLAYER PAGE     — this season first, then the career with the team's abbreviation next to every year, then height / weight / age;
+                        soccer player stats and leaders through API-Football (free key in Customize → System)
+     ∙ PAST SEASONS    — season picker for standings, team pages (schedule, roster, stats, rankings) and leaders
+     ∙ FAVORITE ALERTS — power plays / penalty kills (with PP and PK stats), penalty kicks and red cards, red zone trips, turnovers, 10-0 runs,
+                        bases loaded; a tracker tab in the game window shows the numbers
+     ∙ RACING & EVENTS — Formula 1 (and IndyCar, NASCAR, golf, tennis, UFC): alerts 15 minutes before and when practice, qualifying,
+                        the race start and finish, plus an Events tab
 V22  ∙ FAVORITES        — find a team by name across every tracked league and add it everywhere it plays (Crystal Palace: league, cups, Europe);
                         a favorite club stays a favorite in new competitions automatically
      ∙ TEAM STATS       — click a team inside any live / final / upcoming game window for its page; team pages show where they rank (division,
@@ -175,18 +201,114 @@ POPUP_CORNER_LABELS = [("Split: my teams top-left, others top-right", "split")] 
 OPTION_DEFS = []
 OPTION_BY_KEY = {}
 OPTION_GROUPS = []
-def add_option(key, group, label, kind, default, *, lo=None, hi=None, choices=None, hint=""):
+VIRTUAL = {}            # an old setting name -> where its value lives now (merged settings keep working under their old names)
+LEGACY_FLAGS = {}       # checklist setting -> [(old key, flag, default)]
+LABEL_DEFAULTS = {}     # label key -> (icon, text)
+def add_option(key, group, label, kind, default, *, lo=None, hi=None, choices=None, hint="", advanced=False):
     if key in OPTION_BY_KEY:
         raise ValueError(f"add_option({key!r}): duplicate key")
     d = {"key": key, "group": group, "label": label, "kind": kind, "default": default,
-         "lo": lo, "hi": hi, "choices": list(choices or []), "hint": hint}
+         "lo": lo, "hi": hi, "choices": list(choices or []), "hint": hint, "advanced": bool(advanced or key in _ADVANCED)}
     OPTION_DEFS.append(d); OPTION_BY_KEY[key] = d
     if group not in OPTION_GROUPS:
         OPTION_GROUPS.append(group)
+def add_flags(key, group, label, members, hint="", advanced=False):
+    """One setting that holds a checklist (stored as a list). members = [(flag, label, default, old_key)]; every old key keeps working through opt()."""
+    add_option(key, group, label, "flags", [f for f, _l, dflt, _o in members if dflt], choices=[(f, l) for f, l, _d, _o in members], hint=hint, advanced=advanced)
+    LEGACY_FLAGS[key] = [(old, f, dflt) for f, _l, dflt, old in members if old]
+    for f, _l, _d, old in members:
+        if old:
+            VIRTUAL[old] = ("flag", key, f)
+_SNOOZE_DEFAULTS = (30, 60, 120, 240)
+_CLOSE_DEFAULTS = {"football": (8, 1, 30), "basketball": (5, 1, 30), "hockey": (1, 0, 5), "soccer": (1, 0, 5), "baseball": (1, 0, 10), "lacrosse": (2, 0, 10)}
+def _split_label(v):
+    """'🏈 TOUCHDOWN' -> ('🏈', 'TOUCHDOWN')."""
+    v = str(v or "").strip()
+    if not v:
+        return "", ""
+    first, _sp, rest = v.partition(" ")
+    if first and not re.search(r"[A-Za-z0-9]", first):
+        return first, rest.strip()
+    return "", v
+def _parse_snooze(text):
+    nums = [min(1440, max(1, int(x))) for x in re.findall(r"\d+", str(text or ""))][:4]
+    return nums + list(_SNOOZE_DEFAULTS[len(nums):])
+def _parse_margins(text):
+    found = {k: int(v) for k, v in re.findall(r"([a-z]+)\s*[=:]?\s*(\d+)", str(text or "").lower())}
+    return {k: min(hi, max(lo, found.get(k, dflt))) for k, (dflt, lo, hi) in _CLOSE_DEFAULTS.items()}
+def _virtual_value(v):
+    t = v[0]
+    if t == "flag": return v[2] in opt(v[1])
+    if t == "any": return bool(opt(v[1]))
+    if t == "icon": return _split_label(opt(v[1]))[0]
+    if t == "text": return _split_label(opt(v[1]))[1]
+    if t == "snooze": return _parse_snooze(opt("snooze_presets"))[v[1]]
+    if t == "margin": return _parse_margins(opt("close_margins"))[v[1]]
+    if t == "dotvis": return opt("dot_visibility") == v[1]
+    if t == "alias": return opt(v[1])
+    raise KeyError(t)
+def set_opt(key, value):
+    """Change a setting by name, old (merged) names included."""
+    opts = _CONFIG.setdefault("opts", {}); v = VIRTUAL.get(key)
+    if v is None:
+        opts[key] = value; return
+    if v[0] == "flag":
+        cur = set(opt(v[1])); (cur.add if value else cur.discard)(v[2])
+        opts[v[1]] = [f for f, _l in OPTION_BY_KEY[v[1]]["choices"] if f in cur]
+    elif v[0] == "any":
+        opts[v[1]] = list(OPTION_BY_KEY[v[1]]["default"]) if value else []
+    elif v[0] == "alias":
+        opts[v[1]] = value
+    elif v[0] == "dotvis":
+        opts["dot_visibility"] = v[1] if value else "always"
+    else:
+        raise ValueError(f"set_opt({key!r}): not settable by its old name")
+def _migrate_legacy_opts(raw):
+    """Settings saved before the merge (one switch each) are folded into the merged settings, so nothing you chose is lost."""
+    raw = dict(raw)
+    for gkey, members in LEGACY_FLAGS.items():
+        if gkey not in raw and any(old in raw for old, _f, _d in members):
+            on = {f for old, f, dflt in members if _coerce_option({"kind": "bool", "default": dflt}, raw.get(old, dflt))}
+            raw[gkey] = [f for _o, f, _d in members if f in on]
+        for old, _f, _d in members:
+            raw.pop(old, None)
+    if raw.pop("fav_alerts_enabled", True) in (False, "false", "False", 0, "0", "off") and "fav_alert_types" not in raw:
+        raw["fav_alert_types"] = []
+    for k, (ic, tx) in LABEL_DEFAULTS.items():
+        if f"lbl_{k}" not in raw and (f"icon_{k}" in raw or f"label_{k}" in raw):
+            raw[f"lbl_{k}"] = f"{raw.get(f'icon_{k}', ic)} {raw.get(f'label_{k}', tx)}".strip()
+        raw.pop(f"icon_{k}", None); raw.pop(f"label_{k}", None)
+    if "snooze_presets" not in raw and any(f"snooze_{i}" in raw for i in range(1, 5)):
+        raw["snooze_presets"] = ", ".join(str(raw.get(f"snooze_{i}", _SNOOZE_DEFAULTS[i - 1])) for i in range(1, 5))
+    for i in range(1, 5): raw.pop(f"snooze_{i}", None)
+    if "close_margins" not in raw and any(f"close_margin_{k}" in raw for k in _CLOSE_DEFAULTS):
+        raw["close_margins"] = ", ".join(f"{k} {raw.get(f'close_margin_{k}', d[0])}" for k, d in _CLOSE_DEFAULTS.items())
+    for k in _CLOSE_DEFAULTS: raw.pop(f"close_margin_{k}", None)
+    if "dot_visibility" not in raw and ("dot_hidden" in raw or "dot_hide_idle" in raw):
+        raw["dot_visibility"] = "hidden" if _coerce_option({"kind": "bool", "default": False}, raw.get("dot_hidden", False)) else (
+            "idle" if _coerce_option({"kind": "bool", "default": False}, raw.get("dot_hide_idle", False)) else "always")
+    raw.pop("dot_hidden", None); raw.pop("dot_hide_idle", None)
+    if "show_records" not in raw and ("dash_show_records" in raw or "card_show_records" in raw):
+        raw["show_records"] = all(_coerce_option({"kind": "bool", "default": True}, raw.get(k, True)) for k in ("dash_show_records", "card_show_records"))
+    raw.pop("dash_show_records", None); raw.pop("card_show_records", None)
+    if "dash_show_logos" in raw:
+        if not _coerce_option({"kind": "bool", "default": True}, raw["dash_show_logos"]):
+            raw["show_logos"] = False
+        raw.pop("dash_show_logos")
+    return raw
+_ADVANCED = set("""popup_gap popup_margin flash_edge_px flash_opacity flash_duration_ms flash_fade_steps popup_fade_in_steps popup_fade_out_steps ui_refresh_ms
+startup_welcome_delay_ms startup_test_delay_ms startup_recap_delay_ms http_timeout seen_max taskbar_pad dot_margin dash_width dash_height minor_idle_poll_s stale_live_min final_settle_min
+play_detail_wait_s play_detail_late_s play_detail_scan_back play_detail_approx play_detail_extend_s play_followup_popup play_detail_lines play_detail_max_chars play_detail_in_phone
+card_divider card_record card_clock card_border_opacity card_bar_px card_side_bar_px shadow_alpha shadow_blur card_radius dot_live_color dot_idle_color flash_default_color
+standings_cache_min standings_row_px log_max history_max dash_logo_size raise_every_second pause_hold_seconds fav_poll_s phone_title_prefix phone_include_tag
+detail_full_history box_fallback commentary_show_age detail_scoring_lines detail_logo_size popout_autoclose_s obs_overlay_width obs_overlay_height obs_overlay_show_s obs_overlay_max""".split())
 def _coerce_option(d, raw):
     """Validate/convert one raw value for option definition d (falls back to the default)."""
     kind = d["kind"]; default = d["default"]
     try:
+        if kind == "flags":
+            items = set(raw) if isinstance(raw, (list, tuple, set)) else set(x for x in re.split(r"[,\s]+", str(raw or "")) if x)
+            return [f for f, _l in d["choices"] if f in items]
         if kind == "bool":
             if isinstance(raw, str):
                 return raw.strip().lower() in ("1", "true", "yes", "on")
@@ -214,10 +336,13 @@ def _coerce_option(d, raw):
     except Exception:
         return default
 def _sanitize_opts(raw):
-    raw = raw if isinstance(raw, dict) else {}
+    raw = _migrate_legacy_opts(raw if isinstance(raw, dict) else {})
     return {d["key"]: _coerce_option(d, raw.get(d["key"], d["default"])) for d in OPTION_DEFS}
 def opt(key):
-    """Current value of a setting (falls back to its default)."""
+    """Current value of a setting (falls back to its default). Merged settings still answer to their old names."""
+    v = VIRTUAL.get(key)
+    if v is not None:
+        return _virtual_value(v)
     d = OPTION_BY_KEY[key]
     try:
         return _CONFIG.get("opts", {}).get(key, d["default"])
@@ -225,17 +350,26 @@ def opt(key):
         return d["default"]
 
 # ---- Alerts -----------------------------------------------------------------
-add_option("alert_scores",   "Alerts", "Score alerts (goals, touchdowns, runs, ...)", "bool", True)
+add_flags("alert_types", "Alerts", "Alert me about", [("scores", "Scores (goals, touchdowns, runs ...)", True, "alert_scores"), ("shootout", "Shootout / penalty-shootout goals", True, "alert_shootout"),
+          ("period", "Periods, quarters, innings, halftime", True, "alert_period"), ("final", "Final scores", True, "alert_final"),
+          ("live", "Game started", True, "alert_game_live"), ("reversal", "Score overturned / removed", True, "alert_reversal")])
 add_option("suppress_postgame_dump","Alerts", "Games ESPN only updates at full time: show just the final score (no goal-by-goal flood)", "bool", True)
-add_option("alert_shootout", "Alerts", "Shootout / penalty-shootout goal alerts", "bool", True)
-add_option("alert_period",   "Alerts", "Period / quarter / inning / halftime alerts", "bool", True)
-add_option("alert_final",    "Alerts", "Final score alerts", "bool", True)
-add_option("alert_game_live","Alerts", "'Game started' alerts", "bool", True)
-add_option("alert_reversal", "Alerts", "Score overturned / removed alerts", "bool", True)
+add_flags("basketball_alerts", "Alerts", "Basketball extras (both off by default: they flood the feed)", [("baskets", "Basket-by-basket score alerts (NBA, WNBA, college ...)", False, "alert_basketball_scores"),
+          ("overturns", "Overturned-score alerts (almost always 1-point corrections)", False, "alert_basketball_reversals")])
+add_flags("fav_alert_types", "Alerts", "Special alerts for my favorite teams' live games (untick all to turn them off)", [
+          ("powerplay", "Hockey: power play / penalty kill (with PP and PK stats)", True, "fav_alert_powerplay"), ("penalty_kick", "Soccer: penalty kicks for / against", True, "fav_alert_penalty_kick"),
+          ("red_card", "Soccer: red cards", True, "fav_alert_red_card"), ("redzone", "Football: red zone (with trips, TDs, FGs)", True, "fav_alert_redzone"),
+          ("turnover", "Football: turnovers", True, "fav_alert_turnover"), ("run", "Basketball: 10-0 runs", True, "fav_alert_run"), ("bases_loaded", "Baseball: bases loaded", True, "fav_alert_bases_loaded")])
+VIRTUAL["fav_alerts_enabled"] = ("any", "fav_alert_types")
+add_option("fav_poll_s","Alerts", "How often to read a favorite's live play-by-play (seconds)", "int", 20, lo=10, hi=120)
+add_flags("event_series", "Racing & Events", "Follow (start / finish alerts and the Events tab)", [("f1", "Formula 1: practice, qualifying, sprint, race", True, "ev_f1"), ("indycar", "IndyCar", False, "ev_indycar"),
+          ("nascar", "NASCAR Cup", False, "ev_nascar"), ("pga", "PGA Tour", False, "ev_pga"), ("lpga", "LPGA Tour", False, "ev_lpga"), ("atp", "ATP tennis", False, "ev_atp"),
+          ("wta", "WTA tennis", False, "ev_wta"), ("ufc", "UFC", False, "ev_ufc")])
+add_flags("event_alert_when", "Racing & Events", "Alert me when a session / event", [("soon", "is about to start", True, "ev_alert_soon"), ("start", "starts", True, "ev_alert_start"),
+          ("finish", "finishes (with the top finishers)", True, "ev_alert_finish")])
+add_option("ev_soon_min",    "Racing & Events", "   ...this many minutes before", "int", 15, lo=1, hi=120)
 add_option("alert_only_mine","Alerts", "Only alert for my favorite teams", "bool", False,
            hint="The dashboard still shows every game.")
-add_option("alert_basketball_scores","Alerts", "Basket-by-basket score alerts in basketball (every league: NBA, WNBA, college ...)", "bool", False,
-           hint="Very frequent; NBA period/final alerts are always on.")
 add_option("startup_welcome_popup","Alerts", "Welcome popup when the app starts", "bool", False)
 add_option("startup_recap_popup",  "Alerts", "Daily recap popup when the app starts (yesterday + today's finals)", "bool", False)
 add_option("startup_test_popup",   "Alerts", "Startup self-test result popup", "bool", False)
@@ -247,12 +381,10 @@ add_option("close_mine_only","Alerts", "   ...only for my favorite teams", "bool
 add_option("close_minutes",  "Alerts", "   ...'late' means the last N minutes", "int", 5, lo=1, hi=20,
            hint="Soccer uses the last N minutes of the 90.")
 add_option("close_baseball_inning","Alerts", "   ...baseball: from this inning on", "int", 9, lo=5, hi=12)
-add_option("close_margin_football",  "Alerts", "   ...close = within (football points)", "int", 8, lo=1, hi=30)
-add_option("close_margin_basketball","Alerts", "   ...close = within (basketball points)", "int", 5, lo=1, hi=30)
-add_option("close_margin_hockey",    "Alerts", "   ...close = within (hockey goals)", "int", 1, lo=0, hi=5)
-add_option("close_margin_soccer",    "Alerts", "   ...close = within (soccer goals)", "int", 1, lo=0, hi=5)
-add_option("close_margin_baseball",  "Alerts", "   ...close = within (baseball runs)", "int", 1, lo=0, hi=10)
-add_option("close_margin_lacrosse",  "Alerts", "   ...close = within (lacrosse goals)", "int", 2, lo=0, hi=10)
+add_option("close_margins", "Alerts", "   ...close = within (points / goals / runs)", "str", "football 8, basketball 5, hockey 1, soccer 1, baseball 1, lacrosse 2",
+           hint="sport + number, separated by commas")
+for _sp in _CLOSE_DEFAULTS:
+    VIRTUAL[f"close_margin_{_sp}"] = ("margin", _sp)
 
 # ---- Quiet hours / snooze ---------------------------------------------------
 add_option("quiet_enabled",  "Quiet Hours", "Enable quiet hours (no popups)", "bool", False)
@@ -277,7 +409,16 @@ add_option("flash_opacity",  "Popups", "   ...flash strength (%)", "int", 55, lo
 add_option("dot_size",       "Popups", "Green dot size (px)", "int", 32, lo=16, hi=96)
 add_option("dot_opacity",    "Popups", "Green dot opacity (%)", "int", 100, lo=20, hi=100)
 add_option("dot_show_count", "Popups", "Show the live-game count on the dot", "bool", True)
-add_option("dot_hide_idle",  "Popups", "Hide the dot when no games are live", "bool", False)
+add_option("dot_visibility", "Popups", "Green dot", "choice", "always", choices=[("always", "Always show it"), ("idle", "Hide it when no games are live"),
+           ("hidden", "Hide it completely (the app keeps running)")])
+VIRTUAL["dot_hide_idle"] = ("dotvis", "idle"); VIRTUAL["dot_hidden"] = ("dotvis", "hidden")
+add_option("popups_on_screen","Popups", "Show notifications on the desktop (turn off to use only the OBS overlay window)", "bool", True)
+add_option("obs_overlay_width", "Popups", "Overlay window width (px)", "int", 820, lo=400, hi=3000)
+add_option("obs_overlay_height","Popups", "Overlay window height (px)", "int", 420, lo=150, hi=2000)
+add_option("obs_overlay_bg",    "Popups", "Overlay background color (key this color out in OBS)", "color", "#00FF00")
+add_option("obs_overlay_show_s","Popups", "Seconds each notification stays in the overlay", "int", 12, lo=3, hi=120)
+add_option("obs_overlay_max",   "Popups", "Most notifications shown at once", "int", 3, lo=1, hi=8)
+add_option("obs_overlay_auto",  "Popups", "Open the overlay window when the app starts", "bool", False)
 _DOT_ACTIONS = [("dashboard", "Open dashboard"), ("myteams", "My Teams window"), ("settings", "Settings"),
                 ("history", "Notification history"), ("snooze", "Snooze / un-snooze (1 hour)"),
                 ("pause", "Pause / resume popups"), ("quit", "Quit the app")]
@@ -289,10 +430,11 @@ add_option("dash_open_at_start","Dashboard", "Open the dashboard when the app st
 add_option("close_mini_with_dashboard","Dashboard", "Closing the dashboard also closes the pinned mini scoreboard", "bool", True)
 add_option("dash_always_on_top","Dashboard", "Keep the dashboard above other windows", "bool", False)
 _TAB_CHOICES = [("live", "Live"), ("upcoming", "Upcoming"), ("final", "Final"), ("schedule", "Schedule"),
-                ("history", "History"), ("standings", "Standings"), ("season", "Season"), ("log", "Log")]
+                ("history", "History"), ("standings", "Standings"), ("season", "Season"), ("leaders", "Leaders"), ("events", "Events"), ("teams", "Teams"), ("log", "Log")]
 add_option("dash_default_tab","Dashboard", "Tab shown first", "choice", "live", choices=_TAB_CHOICES)
 add_option("dash_time_24h",  "Dashboard", "Use 24-hour clock", "bool", False)
-add_option("dash_show_records","Dashboard", "Show team records on game cards", "bool", True)
+add_option("show_records", "Dashboard", "Show team records (game cards and popups)", "bool", True)
+VIRTUAL["dash_show_records"] = ("alias", "show_records"); VIRTUAL["card_show_records"] = ("alias", "show_records")
 add_option("dash_show_venue","Dashboard", "Show venue on game cards", "bool", True)
 add_option("dash_mine_first","Dashboard", "List my favorite teams' games first", "bool", True)
 add_option("dash_mine_only", "Dashboard", "Show only my favorite teams' games", "bool", False)
@@ -323,14 +465,10 @@ add_option("telegram_chat",  "Phone", "Telegram chat id", "str", "")
 add_option("custom_webhook", "Phone", "Custom webhook URL (gets JSON POST)", "secret", "")
 add_option("phone_mine_only","Phone", "Only send my favorite teams", "bool", True)
 add_option("phone_respect_quiet","Phone", "Respect quiet hours / snooze", "bool", True)
-add_option("phone_scores",   "Phone", "Send score alerts", "bool", True)
-add_option("phone_final",    "Phone", "Send final scores", "bool", True)
-add_option("phone_start",    "Phone", "Send 'starting soon' alerts", "bool", True)
-add_option("phone_close",    "Phone", "Send close-game alerts", "bool", True)
-add_option("phone_live",     "Phone", "Send 'game started' alerts", "bool", False)
-add_option("phone_period",   "Phone", "Send period / halftime alerts", "bool", False)
-add_option("phone_reversal", "Phone", "Send overturned-score alerts", "bool", True)
-add_option("phone_recap",    "Phone", "Send the daily recap", "bool", False)
+add_flags("phone_types", "Phone", "Send to my phone", [("scores", "Score alerts", True, "phone_scores"), ("final", "Final scores", True, "phone_final"),
+          ("start", "'Starting soon'", True, "phone_start"), ("close", "Close games", True, "phone_close"), ("live", "'Game started'", False, "phone_live"),
+          ("period", "Periods / halftime", False, "phone_period"), ("reversal", "Overturned scores", True, "phone_reversal"),
+          ("fav", "Favorite-team specials (power play, red zone ...)", True, "phone_fav"), ("recap", "The daily recap", False, "phone_recap")])
 
 # ---- System -----------------------------------------------------------------------
 add_option("autostart",      "System", "Start with Windows", "bool", False)
@@ -344,9 +482,7 @@ add_option("pause_hold_seconds","System", "   ...seconds to hold Enter", "int", 
 add_option("raise_every_second","System", "Re-raise the dot/popups every second (stay on top)", "bool", True)
 
 # ---- NBA period alerts -------------------------------------------------------------
-add_option("nba_alert_q1",   "Alerts", "NBA: alert at the end of Q1", "bool", True)
-add_option("nba_alert_half", "Alerts", "NBA: alert at halftime", "bool", True)
-add_option("nba_alert_q3",   "Alerts", "NBA: alert at the end of Q3", "bool", True, hint="NBA finals are always on.")
+add_flags("nba_period_alerts", "Alerts", "NBA: alert at the end of", [("q1", "Q1", True, "nba_alert_q1"), ("half", "Halftime", True, "nba_alert_half"), ("q3", "Q3", True, "nba_alert_q3")])
 
 # ---- Theme: window colors + fonts (applied to new windows; restart for the open ones) ----
 add_option("color_bg",     "Theme", "Window background",            "color", "#0D1117")
@@ -380,7 +516,6 @@ add_option("card_abbr",      "Popup Card", "Team abbreviation color", "color", "
 add_option("card_record",    "Popup Card", "Team record color",       "color", "#AAAAAA")
 add_option("card_clock",     "Popup Card", "Period / clock color",    "color", "#828282")
 add_option("card_divider",   "Popup Card", "Divider line color",      "color", "#2D2D2D")
-add_option("card_show_records","Popup Card", "Show team records under the logos", "bool", True)
 add_option("popup_width",    "Popup Card", "Popup width (px)",        "int", 460, lo=300, hi=800)
 add_option("logo_size",      "Popup Card", "Team logo size (px)",     "int", 52, lo=24, hi=96)
 add_option("card_score_size","Popup Card", "Score text size",         "int", 28, lo=14, hi=60)
@@ -396,29 +531,29 @@ add_option("dot_idle_color", "Popup Card", "Green dot color (nothing live)", "co
 add_option("flash_default_color","Popup Card", "Flash color for non-favorite teams (blank = sport accent)", "color", "")
 
 # ---- Timing & behavior ------------------------------------------------------------------
-add_option("popup_fade_in_steps", "Timing", "Popup fade-in steps (higher = slower)",  "int", 12, lo=1, hi=40)
-add_option("popup_fade_out_steps","Timing", "Popup fade-out steps (higher = slower)", "int", 10, lo=1, hi=40)
-add_option("flash_duration_ms",   "Timing", "Screen flash duration (ms)",             "int", 1800, lo=300, hi=6000)
-add_option("flash_fade_steps",    "Timing", "Screen flash fade-out steps",            "int", 18, lo=4, hi=60)
-add_option("ui_refresh_ms",       "Timing", "Dashboard log / history refresh (ms)",   "int", 3000, lo=500, hi=30000)
-add_option("startup_welcome_delay_ms","Timing", "Welcome popup delay at startup (ms)", "int", 800, lo=0, hi=20000)
-add_option("startup_test_delay_ms",   "Timing", "Self-test popup delay at startup (ms)", "int", 2200, lo=0, hi=20000)
-add_option("startup_recap_delay_ms",  "Timing", "Daily recap delay at startup (ms)",  "int", 1800, lo=0, hi=30000)
-add_option("http_timeout",        "Timing", "Network timeout (seconds)",              "int", 8, lo=2, hi=60)
-add_option("seen_max",            "Timing", "Remember this many already-alerted plays", "int", 2000, lo=200, hi=20000)
+add_option("popup_fade_in_steps", "System", "Popup fade-in steps (higher = slower)",  "int", 12, lo=1, hi=40)
+add_option("popup_fade_out_steps","System", "Popup fade-out steps (higher = slower)", "int", 10, lo=1, hi=40)
+add_option("flash_duration_ms",   "System", "Screen flash duration (ms)",             "int", 1800, lo=300, hi=6000)
+add_option("flash_fade_steps",    "System", "Screen flash fade-out steps",            "int", 18, lo=4, hi=60)
+add_option("ui_refresh_ms",       "System", "Dashboard log / history refresh (ms)",   "int", 3000, lo=500, hi=30000)
+add_option("startup_welcome_delay_ms","System", "Welcome popup delay at startup (ms)", "int", 800, lo=0, hi=20000)
+add_option("startup_test_delay_ms",   "System", "Self-test popup delay at startup (ms)", "int", 2200, lo=0, hi=20000)
+add_option("startup_recap_delay_ms",  "System", "Daily recap delay at startup (ms)",  "int", 1800, lo=0, hi=30000)
+add_option("http_timeout",        "System", "Network timeout (seconds)",              "int", 8, lo=2, hi=60)
+add_option("seen_max",            "System", "Remember this many already-alerted plays", "int", 2000, lo=200, hi=20000)
 add_option("final_days_back",     "Dashboard", "Final tab: finished games from this many days back (0 = today only)", "int", 1, lo=0, hi=7)
 add_option("upcoming_days_ahead", "Dashboard", "Upcoming tab: games up to this many days ahead (0 = today only)", "int", 0, lo=0, hi=7)
 add_option("fav_upcoming_enabled","Dashboard", "Show my favorite teams' upcoming games for the next week, in their own section", "bool", False)
 add_option("fav_upcoming_days",   "Dashboard", "   ...how many days ahead for my favorite teams", "int", 7, lo=1, hi=21)
-add_option("taskbar_pad",         "Timing", "Gap above the taskbar for bottom corners (px)", "int", 48, lo=0, hi=200)
-add_option("dot_margin",          "Timing", "Green dot distance from the screen edge (px)",  "int", 10, lo=0, hi=100)
-add_option("dash_width",          "Timing", "Dashboard window width (px)",            "int", 1100, lo=900, hi=2600, hint="Restart to apply.")
-add_option("dash_height",         "Timing", "Dashboard window height (px)",           "int", 720, lo=600, hi=1600, hint="Restart to apply.")
+add_option("taskbar_pad",         "System", "Gap above the taskbar for bottom corners (px)", "int", 48, lo=0, hi=200)
+add_option("dot_margin",          "System", "Green dot distance from the screen edge (px)",  "int", 10, lo=0, hi=100)
+add_option("dash_width",          "System", "Dashboard window width (px)",            "int", 1100, lo=900, hi=2600, hint="Restart to apply.")
+add_option("dash_height",         "System", "Dashboard window height (px)",           "int", 720, lo=600, hi=1600, hint="Restart to apply.")
 
-add_option("minor_idle_poll_s","Timing", "Smaller leagues: look for new games every N seconds when nothing is on", "int", 600, lo=60, hi=3600,
+add_option("minor_idle_poll_s","System", "Smaller leagues: look for new games every N seconds when nothing is on", "int", 600, lo=60, hi=3600,
            hint="Leagues with a live game are checked every cycle; ones about to start every 45 s.")
-add_option("stale_live_min","Timing", "A live game with no change at all (score, clock, period) for this many minutes is ended as Final* (ESPN forgot to end it; 0 = off)", "int", 30, lo=0, hi=240)
-add_option("final_settle_min","Timing", "After a game ends, keep double-checking its final score for this many minutes (0 = off)", "int", 15, lo=0, hi=60,
+add_option("stale_live_min","System", "A live game with no change at all (score, clock, period) for this many minutes is ended as Final* (ESPN forgot to end it; 0 = off)", "int", 30, lo=0, hi=240)
+add_option("final_settle_min","System", "After a game ends, keep double-checking its final score for this many minutes (0 = off)", "int", 15, lo=0, hi=60,
            hint="Catches a goal in the last seconds that ESPN's scoreboard adds late.")
 # ---- Labels: the icon and wording of every alert (edit freely) -----------------------------
 _SCORE_LABEL_BASE = {   # key: (icon, text, human name)
@@ -447,8 +582,8 @@ _OTHER_LABEL_BASE = {
 }
 for _group_base in (_SCORE_LABEL_BASE, _PERIOD_LABEL_BASE, _OTHER_LABEL_BASE):
     for _k, (_ic, _tx, _nm) in _group_base.items():
-        add_option(f"icon_{_k}",  "Labels", f"{_nm}: icon", "str", _ic)
-        add_option(f"label_{_k}", "Labels", f"{_nm}: text", "str", _tx)
+        add_option(f"lbl_{_k}", "Labels", f"{_nm}  (icon + text)", "str", f"{_ic} {_tx}")
+        VIRTUAL[f"icon_{_k}"] = ("icon", f"lbl_{_k}"); VIRTUAL[f"label_{_k}"] = ("text", f"lbl_{_k}"); LABEL_DEFAULTS[_k] = (_ic, _tx)
 def _label_pair(key):
     """(icon, text) for an alert, honoring the user's Labels settings (blank falls back to default)."""
     base = _SCORE_LABEL_BASE.get(key) or _PERIOD_LABEL_BASE.get(key) or _OTHER_LABEL_BASE.get(key)
@@ -459,18 +594,19 @@ add_option("card_click_action", "Game Details", "Clicking a game card on the das
            choices=[("detail", "Open the game details window (stats + plays/commentary)"),
                     ("espn", "Open the game on ESPN in the browser"), ("none", "Do nothing")])
 add_option("detail_refresh_s",  "Game Details", "Refresh a live game's details every N seconds", "int", 15, lo=5, hi=120)
-add_option("detail_feed_max","Game Details", "Most plays shown in the play-by-play (0 = all of them, from the very first play)", "int", 0, lo=0, hi=5000)
+add_option("detail_feed_limit","Game Details", "Most plays shown in the play-by-play (0 = all of them, from the very first play)", "int", 0, lo=0, hi=5000)
 add_option("detail_show_stats", "Game Details", "Show the team stats table (possession, shots, yards...)", "bool", True)
 add_option("detail_width",      "Game Details", "Window width (px)", "int", 980, lo=640, hi=2000)
 add_option("detail_height",     "Game Details", "Window height (px)", "int", 680, lo=420, hi=1400)
 add_option("detail_font_size",  "Game Details", "Plays / commentary text size", "int", 10, lo=8, hi=20)
 add_option("popout_autoclose_s","Game Details", "Game / team / player windows close themselves this many seconds after you click back to the main page (0 = never)", "int", 20, lo=0, hi=300)
+add_option("box_fallback","Game Details", "Box score from ESPN's player data when the game summary has none", "bool", True)
 add_option("detail_full_history","Game Details", "Fetch ESPN's full play list when the game summary has only part of it", "bool", True)
 add_option("detail_on_top",     "Game Details", "Keep the details window above other windows", "bool", False)
 add_option("commentary_goal_text","Game Details", "Use the match commentary text on soccer goal popups", "bool", True,
            hint="Off = use ESPN's short goal description instead.")
 add_option("commentary_show_age", "Game Details", "Show how old the newest entry is (a live-ness check)", "bool", True)
-add_option("dash_show_logos", "Dashboard", "Show team logos on the game cards", "bool", True)
+VIRTUAL["dash_show_logos"] = ("alias", "show_logos")
 add_option("dash_logo_size",  "Dashboard", "Card logo size (px)", "int", 28, lo=16, hi=64)
 add_option("detail_logo_size","Game Details", "Game details logo size (px)", "int", 56, lo=24, hi=120)
 add_option("detail_show_scoring","Game Details", "Show the scoring summary (who scored, and when) at the top", "bool", True)
@@ -479,10 +615,9 @@ add_option("mini_bg",        "Dashboard", "Mini scoreboard background (blank = p
 add_option("mini_text",      "Dashboard", "Mini scoreboard text (blank = main text color)", "color", "")
 add_option("standings_cache_min","Dashboard", "Standings refresh cache (minutes)", "int", 5, lo=1, hi=120)
 add_option("standings_row_px",   "Dashboard", "Standings row height (px)", "int", 24, lo=16, hi=48, hint="Restart to apply.")
-add_option("snooze_1", "Quiet Hours", "Snooze preset 1 (minutes)", "int", 30,  lo=1, hi=1440)
-add_option("snooze_2", "Quiet Hours", "Snooze preset 2 (minutes)", "int", 60,  lo=1, hi=1440)
-add_option("snooze_3", "Quiet Hours", "Snooze preset 3 (minutes)", "int", 120, lo=1, hi=1440)
-add_option("snooze_4", "Quiet Hours", "Snooze preset 4 (minutes)", "int", 240, lo=1, hi=1440)
+add_option("snooze_presets", "Quiet Hours", "Snooze presets (minutes, up to four)", "str", "30, 60, 120, 240")
+for _i in range(4):
+    VIRTUAL[f"snooze_{_i + 1}"] = ("snooze", _i)
 add_option("phone_title_prefix", "Phone", "Text added before every phone alert title", "str", "")
 add_option("phone_include_tag",  "Phone", "Add the league tag, like [NFL], to phone alerts", "bool", True)
 add_option("play_detail_enabled","Alerts", "Show the scoring play on score popups (\"Nacua 40-yd TD pass\")", "bool", True,
@@ -500,11 +635,8 @@ add_option("play_detail_extend_s","Alerts", "   ...when the play turns up late, 
 add_option("play_followup_popup","Alerts", "   ...if that popup is already gone, show a small 'SCORING PLAY' popup", "bool", False)
 add_option("play_detail_lines",  "Alerts", "   ...max lines of play text on the popup", "int", 2, lo=1, hi=3)
 add_option("play_detail_max_chars","Alerts", "   ...max characters of play text", "int", 140, lo=40, hi=300)
-add_option("play_detail_football","Alerts", "   ...football (NFL, college, CFL)", "bool", True)
-add_option("play_detail_baseball","Alerts", "   ...baseball (MLB)", "bool", True)
-add_option("play_detail_hockey",  "Alerts", "   ...hockey (NHL)", "bool", True)
-add_option("play_detail_basketball","Alerts", "   ...basketball", "bool", True)
-add_option("play_detail_soccer", "Alerts", "   ...soccer (goal commentary)", "bool", True)
+add_flags("play_detail_sports", "Alerts", "Show the scoring play for", [("football", "Football (NFL, college, CFL)", True, "play_detail_football"), ("baseball", "Baseball", True, "play_detail_baseball"),
+          ("hockey", "Hockey", True, "play_detail_hockey"), ("basketball", "Basketball", True, "play_detail_basketball"), ("soccer", "Soccer (goal commentary)", True, "play_detail_soccer")])
 add_option("play_detail_in_phone","Alerts", "   ...include the play in history and phone alerts", "bool", True)
 _DEFAULT_CONFIG = {
     "api_keys": {
@@ -874,7 +1006,7 @@ SNOOZE_CHOICES = [("30 minutes", 30), ("1 hour", 60), ("2 hours", 120), ("4 hour
 TEAM_ALERT_LEVELS = [("all", "Everything"), ("key", "Scores, finals, close games & start only"),
                      ("final", "Final results only"), ("off", "No popups (dashboard only)")]
 _LEVEL_RANK  = {"off": 0, "final": 1, "key": 2, "all": 3}
-_LEVEL_KINDS = {"all": None, "key": {"score", "reversal", "final", "close", "start"},
+_LEVEL_KINDS = {"all": None, "key": {"score", "reversal", "final", "close", "start", "fav"},
                 "final": {"final"}, "off": set()}
 def _my_team_key(sport, abbr):
     abbr = str(abbr or "").upper()
@@ -993,7 +1125,8 @@ def history_entries():
 # ---- phone / webhook alerts ------------------------------------------------------------------
 _PHONE_KIND_OPT = {"score": "phone_scores", "final": "phone_final", "start": "phone_start",
                    "close": "phone_close", "game_live": "phone_live", "period": "phone_period",
-                   "reversal": "phone_reversal", "recap": "phone_recap"}
+                   "reversal": "phone_reversal", "recap": "phone_recap", "fav": "phone_fav"}
+_KIND_OPT["fav"] = "fav_alerts_enabled"
 def _safe_url(url):
     url = str(url or "").strip()
     return url if re.match(r"^https?://[^\s]+$", url, re.I) else ""
@@ -1071,7 +1204,7 @@ def send_phone_test(callback):
         if not phone_configured():
             callback([("Phone", False, "Nothing is connected yet - fill in a destination and Save first")])
             return
-        callback(_send_phone_now("🏟 Sports Score Tracker", "Test alert - your phone is connected!"))
+        callback(_send_phone_now("Sports Score Tracker", "Test alert - your phone is connected!"))
     threading.Thread(target=_run, daemon=True).start()
 def _notify(kind, game, icon, label, text, is_mine):
     """Record in history and push to phone. (The popup itself is shown by the caller.)"""
@@ -2235,7 +2368,7 @@ def parse_game_detail(data, game):
                     total = va + vh
                 out["possession"] = {"away": va / total * 100.0, "home": vh / total * 100.0, "away_text": da, "home_text": dh}
     # --- feed: commentary (soccer) or plays
-    limit = int(opt("detail_feed_max"))
+    limit = int(opt("detail_feed_limit"))
     if kind == "soccer":
         rows = extract_commentary(data)
         if rows:
@@ -2278,6 +2411,10 @@ def parse_game_detail(data, game):
             out["players"].append({"team": str(((t or {}).get("team") or {}).get("abbreviation") or ((t or {}).get("team") or {}).get("displayName") or ""), "categories": cats})
     try:
         out["scoring"] = build_scoring_summary(data, game, kind)
+        if kind == "basketball":
+            m = margin_series(_all_plays_in_order(data), game)
+            if len(m["series"]) > 2:
+                out["margin"] = m
     except Exception:
         out["scoring"] = []
     return out
@@ -2353,6 +2490,93 @@ def fetch_team_schedule(sport, team_id, max_age=300, season=None):
     while len(_TEAM_CACHE) > 60:
         _TEAM_CACHE.pop(next(iter(_TEAM_CACHE)))
     return out
+def clean_stat(v):
+    """Player / team stats without noise: 4200.0 -> 4200, 7.2345 -> 7.2, 1,250 stays 1,250."""
+    t = str(v).strip()
+    if not re.fullmatch(r"-?\d+\.\d+", t):
+        return t
+    f = float(t)
+    if abs(f - round(f)) < 1e-9 or abs(f) >= 100:
+        return str(int(round(f)))
+    return f"{f:.1f}"
+def _clean_category_name(name):
+    """'Own Passing' / 'ownPassing' -> 'Passing' (the team's own numbers); opponent categories keep their label."""
+    n = str(name or "").strip()
+    n = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", n)
+    n = re.sub(r"^\s*own[\s_-]*", "", n, flags=re.I).strip()
+    return (n[:1].upper() + n[1:]) if n else str(name or "")
+def _core_base(sport):
+    path = SPORT_PATH.get(sport, "")
+    if "/" not in path or sport in EXTERNAL_SPORTS:
+        return None
+    family, slug = path.split("/", 1)
+    return f"https://sports.core.api.espn.com/v2/sports/{family}/leagues/{slug}"
+_REF_CACHE = {}
+def _core_ref(url, max_age=6 * 3600):
+    c = _REF_CACHE.get(url)
+    if c and time.time() - c[0] < max_age:
+        return c[1]
+    data = json_get(url, timeout=12)
+    if isinstance(data, dict):
+        _REF_CACHE[url] = (time.time(), data)
+        while len(_REF_CACHE) > 1500:
+            _REF_CACHE.pop(next(iter(_REF_CACHE)))
+    return data
+def _resolve_refs(refs, workers=8):
+    """Follow a list of ESPN '$ref' links in parallel (core API lists point at the real records)."""
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda u: _core_ref(u) if u else None, refs))
+def fetch_core_player_stats(sport, athlete_id, season=None):
+    """Free, no key: this season's stats and the career totals of any athlete (soccer included) from ESPN's core API.
+    Returns 'flat' categories: [{'name', 'labels': ['Value'], 'rows': [(stat, [value])], 'flat': True, 'career': bool}]."""
+    base = _core_base(sport)
+    if not base or not athlete_id:
+        return []
+    season = season if season is not None else current_season_param(sport)
+    urls = {False: f"{base}/seasons/{season}/types/1/athletes/{athlete_id}/statistics/0", True: f"{base}/athletes/{athlete_id}/statistics"}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        got = dict(zip(urls, pool.map(lambda u: json_get(u, timeout=12), urls.values())))
+    cats = []
+    for career, data in got.items():
+        for name, rows in parse_team_stats(data):
+            cats.append({"name": name, "labels": ["Value"], "rows": [(label, [value]) for label, value, _rank in rows], "flat": True, "career": career})
+    return cats
+def fetch_core_roster(sport, team_id, season):
+    """A team's players in a given season (ESPN core API; the list holds links that are followed in parallel)."""
+    base = _core_base(sport)
+    if not base or not team_id or season is None:
+        return []
+    data = json_get(f"{base}/seasons/{season}/teams/{team_id}/athletes?limit=300", timeout=15)
+    items = [it for it in ((data.get("items") if isinstance(data, dict) else None) or []) if isinstance(it, dict)]
+    direct = [it for it in items if it.get("fullName") or it.get("displayName")]
+    refs = [it.get("$ref") for it in items if not (it.get("fullName") or it.get("displayName")) and it.get("$ref")]
+    resolved = [r for r in _resolve_refs(refs[:90]) if isinstance(r, dict)]
+    return [a for a in (_athlete_row(x) for x in direct + resolved) if a["name"]]
+def fetch_core_soccer_leaders(sport, season=None, category=None):
+    """Soccer leaders (goals, assists ...) from ESPN's core API, no key. Same shape as fetch_leaders."""
+    base = _core_base(sport)
+    if not base:
+        return {"categories": [], "category": None, "rows": []}
+    season = season if season is not None else current_season_param(sport)
+    data = json_get(f"{base}/seasons/{season}/types/1/leaders", timeout=15)
+    cats = []
+    for c in ((data.get("categories") if isinstance(data, dict) else None) or []):
+        if isinstance(c, dict) and c.get("leaders"):
+            name = str(c.get("name") or ""); disp = _clean_category_name(c.get("shortDisplayName") or c.get("displayName") or name)
+            cats.append({"name": name, "display": disp, "labels": [disp], "names": [name], "displays": [disp], "_leaders": c["leaders"]})
+    chosen = category if category and any(c["name"] == category for c in cats) else (cats[0]["name"] if cats else None)
+    rows = []
+    cur = next((c for c in cats if c["name"] == chosen), None)
+    if cur:
+        leaders = [l for l in cur["_leaders"] if isinstance(l, dict)][:25]
+        aths = _resolve_refs([(l.get("athlete") or {}).get("$ref") for l in leaders]); teams = _resolve_refs([(l.get("team") or {}).get("$ref") for l in leaders])
+        for i, (l, a, t) in enumerate(zip(leaders, aths, teams)):
+            a = a if isinstance(a, dict) else {}; t = t if isinstance(t, dict) else {}
+            pos = a.get("position") if isinstance(a.get("position"), dict) else {}
+            rows.append({"rank": i + 1, "name": str(a.get("displayName") or a.get("fullName") or ""), "team": str(t.get("abbreviation") or ""),
+                         "pos": str(pos.get("abbreviation") or ""), "id": str(a.get("id") or ""),
+                         "values": [clean_stat(l.get("displayValue") if l.get("displayValue") is not None else l.get("value", ""))]})
+    return {"categories": [{k: v for k, v in c.items() if k != "_leaders"} for c in cats], "category": chosen, "rows": rows}
 _ROSTER_CACHE = {}
 def _athlete_row(a, group=""):
     pos = a.get("position") if isinstance(a.get("position"), dict) else {}
@@ -2374,8 +2598,13 @@ def fetch_team_roster(sport, team_id, max_age=1800, season=None):
     key = (sport, str(team_id), season); cached = _ROSTER_CACHE.get(key)
     if cached and time.time() - cached[0] < max_age:
         return cached[1]
-    data = json_get(f"https://site.api.espn.com/apis/site/v2/sports/{path}/teams/{team_id}/roster" + (f"?season={season}" if season else ""), timeout=10)
-    out = parse_roster(data)
+    out = []
+    if season is not None:                      # a past season: ESPN's per-season player list first
+        try: out = fetch_core_roster(sport, team_id, season)
+        except Exception: out = []
+    if len(out) < 5:
+        data = json_get(f"https://site.api.espn.com/apis/site/v2/sports/{path}/teams/{team_id}/roster" + (f"?season={season}" if season else ""), timeout=10)
+        out = parse_roster(data) or out
     if out:
         _ROSTER_CACHE[key] = (time.time(), out)
     return out or (cached[1] if cached else [])
@@ -2388,7 +2617,7 @@ def parse_team_stats(data):
             if isinstance(cats, list):
                 for c in cats:
                     if isinstance(c, dict) and isinstance(c.get("stats"), list):
-                        name = str(c.get("displayName") or c.get("name") or "")
+                        name = _clean_category_name(c.get("displayName") or c.get("name") or "")
                         if name in seen:
                             continue
                         seen.add(name)
@@ -2396,7 +2625,7 @@ def parse_team_stats(data):
                         for st in c["stats"]:
                             if isinstance(st, dict):
                                 rank = str(st.get("rankDisplayValue") or (f"#{int(st['rank'])}" if st.get("rank") else ""))
-                                rows.append((str(st.get("displayName") or st.get("name") or ""), str(st.get("displayValue") if st.get("displayValue") is not None else st.get("value", "")), rank))
+                                rows.append((str(st.get("displayName") or st.get("name") or ""), clean_stat(st.get("displayValue") if st.get("displayValue") is not None else st.get("value", "")), rank))
                         if rows:
                             out.append((name, rows))
             for v in node.values():
@@ -2430,12 +2659,12 @@ def parse_player_stats(data, sport=None):
                 season = st.get("season") if isinstance(st.get("season"), dict) else {}
                 team = _team_abbr_lookup(sport, st.get("teamId"), st.get("teamSlug")) if (st.get("teamId") or st.get("teamSlug")) else ""
                 label = str(season.get("displayName") or season.get("year") or "")
-                rows.append(((f"{label}  {team}" if team else label).strip(), [str(v) for v in st["stats"]]))
+                rows.append(((f"{label}  {team}" if team else label).strip(), [clean_stat(v) for v in st["stats"]]))
         totals = c.get("totals")
         if isinstance(totals, list) and totals:
-            rows.append(("Career", [str(v) for v in totals]))
+            rows.append(("Career", [clean_stat(v) for v in totals]))
         if rows and labels:
-            out.append({"name": str(c.get("displayName") or c.get("name") or ""), "labels": labels, "rows": rows})
+            out.append({"name": _clean_category_name(c.get("displayName") or c.get("name") or ""), "labels": labels, "rows": rows})
     return out
 def fetch_player_stats(sport, athlete_id):
     path = SPORT_PATH.get(sport)
@@ -2562,7 +2791,9 @@ SOCCER_LEADER_KINDS = [("Goals", "topscorers"), ("Assists", "topassists"), ("Yel
 # ---- player leaders (ESPN: who has the most passing yards, points, home runs, goals ...) ----
 def fetch_leaders(sport, season=None, category=None, stat=None, limit=50, page=1):
     path = SPORT_PATH.get(sport)
-    if not path or sport in EXTERNAL_SPORTS or sport_kind(sport) == "soccer":
+    if path and sport in SPORT_PATH and sport not in EXTERNAL_SPORTS and sport_kind(sport) == "soccer":
+        return fetch_core_soccer_leaders(sport, season, category)
+    if not path or sport in EXTERNAL_SPORTS:
         return {"categories": [], "category": None, "rows": []}
     url = (f"https://site.web.api.espn.com/apis/common/v3/sports/{path}/statistics/byathlete?region=us&lang=en&contentorigin=espn"
            f"&isqualified=true&limit={limit}&page={page}&seasontype=2")
@@ -2576,7 +2807,7 @@ def parse_leaders(data, category=None, offset=0):
     for c in ((data.get("categories") if isinstance(data, dict) else None) or []):
         if isinstance(c, dict) and c.get("name"):
             labels = [str(x) for x in (c.get("labels") or [])]
-            cats.append({"name": str(c["name"]), "display": str(c.get("displayName") or c["name"]), "labels": labels,
+            cats.append({"name": str(c["name"]), "display": _clean_category_name(c.get("displayName") or c["name"]), "labels": labels,
                          "names": [str(x) for x in (c.get("names") or [])], "displays": [str(x) for x in (c.get("displayNames") or labels)]})
     chosen = category if category and any(c["name"] == category for c in cats) else (cats[0]["name"] if cats else None)
     rows = []
@@ -2585,7 +2816,7 @@ def parse_leaders(data, category=None, offset=0):
         vals = []
         for c in ((a or {}).get("categories") or []):
             if isinstance(c, dict) and c.get("name") == chosen:
-                vals = [str(v) for v in (c.get("values") or c.get("totals") or [])]
+                vals = [clean_stat(v) for v in (c.get("values") or c.get("totals") or [])]
         rows.append({"rank": offset + i + 1, "name": str(ath.get("displayName") or ""), "team": str(ath.get("teamShortName") or ath.get("teamName") or ""),
                      "pos": str(((ath.get("position") or {}) if isinstance(ath.get("position"), dict) else {}).get("abbreviation") or ""), "id": str(ath.get("id") or ""), "values": vals})
     return {"categories": cats, "category": chosen, "rows": rows}
@@ -2598,12 +2829,33 @@ def format_table(labels, rows, first=""):
     def fmt(r):
         return "  ".join((str(r[i]) if i < len(r) else "").ljust(width[i]) if i == 0 else (str(r[i]) if i < len(r) else "").rjust(width[i]) for i in range(len(head)))
     return "\n".join([fmt(head), "  ".join("-" * w for w in width)] + [fmt(r) for r in cells])
+def _pens(game):
+    ap, hp = game.get("away_shootout_score"), game.get("home_shootout_score")
+    return (int(ap), int(hp)) if ap is not None and hp is not None and (ap or hp) else None
+def score_cell(game, side):
+    """One team's score, with its penalty-shootout score in brackets: 1 (5)."""
+    n = game.get(f"{side}_score", 0); p = _pens(game)
+    return f"{n} ({p[0] if side == 'away' else p[1]})" if p else f"{n}"
+def score_text(game, sep=" – "):
+    return f"{score_cell(game, 'away')}{sep}{score_cell(game, 'home')}"
 def team_result(game, team_id):
-    """('W'|'L'|'T', team score, opponent score, opponent abbr, 'vs'|'@') from the team's point of view."""
+    """('W'|'L'|'T', team score, opponent score, opponent abbr, 'vs'|'@') from the team's point of view (a shootout decides a tie)."""
     home = str(game.get("home_team_id")) == str(team_id)
     mine, theirs = (game.get("home_score", 0), game.get("away_score", 0)) if home else (game.get("away_score", 0), game.get("home_score", 0))
     res = "W" if mine > theirs else ("L" if mine < theirs else "T")
+    p = _pens(game)
+    if res == "T" and p:
+        mp, tp = (p[1], p[0]) if home else (p[0], p[1])
+        res = "W" if mp > tp else ("L" if mp < tp else "T")
     return res, mine, theirs, (game.get("away_abbr") if home else game.get("home_abbr")) or "", ("vs" if home else "@")
+def team_result_text(game, team_id):
+    """'W  1–1 (5–3 pens)' from the team's point of view."""
+    res, mine, theirs, _opp, _w = team_result(game, team_id); p = _pens(game)
+    txt = f"{res}  {mine}–{theirs}"
+    if p and mine == theirs:
+        home = str(game.get("home_team_id")) == str(team_id)
+        txt += f" ({p[1] if home else p[0]}–{p[0] if home else p[1]} pens)"
+    return txt
 def team_form(sport, team_id, n=5):
     """The team's last n finished games, newest first: [{'game', 'result'}]."""
     data = fetch_team_schedule(sport, team_id)
@@ -2740,63 +2992,173 @@ def complete_plays(data, game):
     if len(full) > have:
         data = dict(data); data["plays"] = full
     return data
+_BOX_CACHE = {}
+def fetch_core_box_players(game):
+    """Per-player game stats from ESPN's core API (used when the game summary has no box score). Same shape as detail['players']."""
+    base = _core_base(game.get("sport", "")); gid = game.get("id")
+    if not base or not gid:
+        return []
+    key = (game.get("sport"), str(gid)); c = _BOX_CACHE.get(key)
+    if c and time.time() - c[0] < 45:
+        return c[1]
+    teams = []
+    for side in ("away", "home"):
+        tid = game.get(f"{side}_team_id")
+        if not tid:
+            continue
+        roster = json_get(f"{base}/events/{gid}/competitions/{gid}/competitors/{tid}/roster?limit=60", timeout=12)
+        entries = [e for e in ((roster.get("entries") or roster.get("items") or []) if isinstance(roster, dict) else []) if isinstance(e, dict)][:40]
+        def one(e):
+            ref = (e.get("statistics") or {}).get("$ref") if isinstance(e.get("statistics"), dict) else None
+            stats = _core_ref(ref, max_age=30) if ref else (e.get("statistics") if isinstance(e.get("statistics"), dict) else None)
+            ath = e.get("athlete") if isinstance(e.get("athlete"), dict) else {}
+            if ath.get("$ref") and not (ath.get("displayName") or ath.get("fullName")):
+                ath = _core_ref(ath["$ref"]) or {}
+            name = str(ath.get("displayName") or ath.get("fullName") or e.get("displayName") or "")
+            vals = {}
+            for cat in ((stats or {}).get("splits") or {}).get("categories") or []:
+                for st in (cat.get("stats") or []):
+                    disp = str(st.get("shortDisplayName") or st.get("abbreviation") or st.get("displayName") or st.get("name") or "")
+                    v = clean_stat(st.get("displayValue") if st.get("displayValue") is not None else st.get("value", ""))
+                    if disp and v not in ("", "0", "0.0"):
+                        vals[disp] = v
+            return name, vals
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            players = [p for p in pool.map(one, entries) if p[0] and p[1]]
+        if players:
+            labels = []
+            for _n, vals in players:
+                for k in vals:
+                    if k not in labels:
+                        labels.append(k)
+            labels = labels[:9]
+            teams.append({"team": str(game.get(f"{side}_abbr") or side), "categories": [{"name": "Game stats", "labels": labels,
+                          "rows": [(n, [vals.get(k, "") for k in labels]) for n, vals in players]}]})
+    _BOX_CACHE[key] = (time.time(), teams)
+    while len(_BOX_CACHE) > 30:
+        _BOX_CACHE.pop(next(iter(_BOX_CACHE)))
+    return teams
 def fetch_game_detail(game):
     sport = game.get("sport", "")
     if sport in EXTERNAL_SPORTS:
         return external_game_detail(game)
+    form_pool = None; form_futs = {}
+    if game.get("game_state") == "upcoming":       # upcoming games also show each team's last five results (fetched while the summary loads)
+        form_pool = ThreadPoolExecutor(max_workers=2)
+        form_futs = {side: form_pool.submit(team_form, sport, game.get(f"{side}_team_id")) for side in ("away", "home") if game.get(f"{side}_team_id")}
     data = fetch_play_summary(sport, game.get("id"), max_age=3)
     if data:
         data = complete_plays(data, game)
     detail = parse_game_detail(data, game) if data else {"error": "Could not load details from ESPN right now."}
-    if game.get("game_state") == "upcoming":       # upcoming games also show each team's last five results
-        try:
-            detail["form"] = {side: team_form(sport, game.get(f"{side}_team_id")) for side in ("away", "home") if game.get(f"{side}_team_id")}
-        except Exception:
-            detail["form"] = {}
+    if data and not detail.get("players") and game.get("game_state") in ("live", "final") and opt("box_fallback") and game.get("sport") not in EXTERNAL_SPORTS:
+        try: detail["players"] = fetch_core_box_players(game)
+        except Exception: pass
+    if form_pool is not None:
+        form = {}
+        for side, fut in form_futs.items():
+            try: form[side] = fut.result(timeout=20)
+            except Exception: form[side] = []
+        detail["form"] = form
+        form_pool.shutdown(wait=False)
     return detail
+def render_player_sections(cats, athlete, bio=None):
+    """[(kind, text)] for the player window: THIS SEASON first, then CAREER (every season with the team's abbreviation), then ABOUT."""
+    out = []
+    flat_this = [c for c in (cats or []) if c.get("flat") and not c.get("career")]
+    flat_career = [c for c in (cats or []) if c.get("flat") and c.get("career")]
+    this = []; career = []
+    for cat in (cats or []):
+        if cat.get("flat"):
+            continue
+        rows = [r for r in cat["rows"] if not r[0].startswith("Career")]
+        if rows:
+            key = rows[0][0].split("  ")[0]
+            this.append((cat, [r for r in rows if r[0].split("  ")[0] == key]))
+        career.append((cat, cat["rows"]))
+    if this or flat_this:
+        out.append(("cat", "THIS SEASON"))
+        for cat, rows in this:
+            out.append(("sub", cat["name"])); out.append(("table", format_table(cat["labels"], rows, "Season")))
+        for cat in flat_this:
+            out.append(("sub", cat["name"])); out.append(("table", format_table(cat["labels"], cat["rows"], "Stat")))
+    if career or flat_career:
+        out.append(("cat", "CAREER  (year and team)" if career else "CAREER"))
+        for cat, rows in career:
+            out.append(("sub", cat["name"])); out.append(("table", format_table(cat["labels"], rows, "Season")))
+        for cat in flat_career:
+            out.append(("sub", cat["name"])); out.append(("table", format_table(cat["labels"], cat["rows"], "Stat")))
+    bio = bio or {}
+    about = []
+    for label, val in (("Position", athlete.get("pos")), ("Jersey", athlete.get("jersey")), ("Age", athlete.get("age") or bio.get("age")),
+                       ("Height", athlete.get("height") or bio.get("height")), ("Weight", athlete.get("weight") or bio.get("weight")), ("Nationality", bio.get("nationality"))):
+        if val:
+            about.append(f"  {label:<12}{val}")
+    if about:
+        out.append(("cat", "ABOUT")); out.append(("table", "\n".join(about)))
+    return out
 class PlayerWindow(tk.Toplevel):
-    """One player's season (and career) stats, from ESPN."""
+    """One player: this season's stats first, then the career (each year with the team), then height / weight / age."""
     def __init__(self, dash, sport, athlete, team_name=""):
         super().__init__(dash)
-        self.dash = dash; self.sport = sport; self.athlete = dict(athlete); self._closed = False; self._shown = False
+        self.dash = dash; self.sport = sport; self.athlete = dict(athlete); self.team_name = team_name; self._closed = False; self._shown = False
         self.title(f"{athlete.get('name', 'Player')}  —  {team_name}")
-        self.configure(bg=GUI_BG); self.geometry("820x560"); self.minsize(520, 320)
+        self.configure(bg=GUI_BG); self.geometry("860x600"); self.minsize(520, 320)
         self.withdraw()
         hdr = tk.Frame(self, bg=GUI_PANEL); hdr.pack(fill="x")
-        bits = [f"#{athlete['jersey']}" if athlete.get("jersey") else "", athlete.get("pos", ""), team_name,
-                f"age {athlete['age']}" if athlete.get("age") else "", athlete.get("height", ""), athlete.get("weight", "")]
         tk.Label(hdr, text=athlete.get("name", ""), font=(UI_FONT, _fs(16), "bold"), fg=GUI_TEXT, bg=GUI_PANEL, anchor="w").pack(fill="x", padx=16, pady=(12, 0))
-        tk.Label(hdr, text="   ·   ".join(b for b in bits if b), font=(UI_FONT, _fs(10)), fg=GUI_MUTED, bg=GUI_PANEL, anchor="w").pack(fill="x", padx=16, pady=(0, 10))
+        sub = "   ·   ".join(x for x in (team_name, athlete.get("pos", ""), f"#{athlete['jersey']}" if athlete.get("jersey") else "") if x)
+        tk.Label(hdr, text=sub, font=(UI_FONT, _fs(10)), fg=GUI_MUTED, bg=GUI_PANEL, anchor="w").pack(fill="x", padx=16, pady=(0, 10))
         bar = tk.Frame(self, bg=GUI_BG); bar.pack(side="bottom", fill="x", padx=10, pady=8)
         tk.Button(bar, text="📋 Copy all", command=lambda: copy_to_clipboard(self, page_text(self)), font=(UI_FONT, _fs(9)), fg=GUI_TEXT, bg=GUI_PANEL,
                   relief="flat", cursor="hand2", padx=8).pack(side="right")
+        if sport_kind(sport) == "soccer":
+            tk.Button(bar, text="📜 Career by year (optional API-Football key)", command=lambda: self._load(career=True), font=(UI_FONT, _fs(9)), fg=GUI_TEXT,
+                      bg=GUI_PANEL, relief="flat", cursor="hand2", padx=8).pack(side="right", padx=6)
         frame = tk.Frame(self, bg=GUI_BG); frame.pack(fill="both", expand=True, padx=8, pady=(8, 0))
         sb = ttk.Scrollbar(frame, orient="vertical")
         self._text = tk.Text(frame, font=("Consolas", int(opt("detail_font_size"))), bg="#0A0E14", fg=GUI_TEXT, relief="flat", wrap="none",
                              yscrollcommand=sb.set, state="disabled", padx=10, pady=8)
         sb.config(command=self._text.yview); sb.pack(side="right", fill="y"); self._text.pack(side="left", fill="both", expand=True)
-        self._text.tag_configure("cat", foreground=GUI_GREEN, font=("Consolas", int(opt("detail_font_size")) + 1, "bold"))
+        self._text.tag_configure("cat", foreground=GUI_GREEN, font=("Consolas", int(opt("detail_font_size")) + 2, "bold"))
+        self._text.tag_configure("sub", foreground=GUI_BLUE, font=("Consolas", int(opt("detail_font_size")), "bold"))
         self._text.tag_configure("note", foreground=GUI_MUTED)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.dash.watch_popout(self)
+        self._load()
+        try: self.after(6000, lambda: self._finish(None, None, ""))
+        except Exception: pass
+    def _load(self, career=False):
+        sport = self.sport; athlete = self.athlete; team_name = self.team_name
         def _do():
-            try: cats = fetch_player_stats(sport, athlete.get("id"))
-            except Exception: cats = []
-            try: self.after(0, lambda: self._finish(cats))
+            bio, cats, msg = {}, [], ""
+            try:
+                if sport_kind(sport) == "soccer":
+                    cats = fetch_core_player_stats(sport, athlete.get("id"))           # free: ESPN's own soccer player numbers
+                    if str(opt("apifootball_key") or "").strip() and (career or not cats):
+                        bio, af_cats, msg = fetch_soccer_player_stats(sport, athlete, team_name, career=career)
+                        cats = cats + af_cats
+                    elif career:
+                        msg = "Year-by-year career with the team for every season needs the optional API-Football key (Customize → System)."
+                else:
+                    cats = fetch_player_stats(sport, athlete.get("id"))
+            except Exception as exc:
+                msg = f"Could not load stats ({type(exc).__name__})"
+            try: self.after(0, lambda: self._finish(cats, bio, msg))
             except Exception: pass
         threading.Thread(target=_do, daemon=True).start()
-        try: self.after(6000, lambda: self._finish(None))
-        except Exception: pass
-    def _finish(self, cats):
+    def _finish(self, cats, bio=None, msg=""):
         if self._closed or (self._shown and cats is None):
             return
         t = self._text
         t.config(state="normal"); t.delete("1.0", "end")
+        sections = render_player_sections(cats, self.athlete, bio)
         if not cats:
-            t.insert("end", "ESPN has no season statistics for this player right now.\n", "note")
-        for cat in (cats or []):
-            t.insert("end", f"{cat['name']}\n", "cat")
-            t.insert("end", format_table(cat["labels"], cat["rows"], "Season") + "\n\n")
+            t.insert("end", (msg or "ESPN has no season statistics for this player right now.") + "\n\n", "note")
+        for kind, text in sections:
+            if kind == "table":
+                t.insert("end", text + "\n\n")
+            else:
+                t.insert("end", text + "\n", kind)
         t.config(state="disabled")
         if not self._shown:
             self._shown = True
@@ -2808,11 +3170,112 @@ class PlayerWindow(tk.Toplevel):
         except Exception: pass
         try: self.destroy()
         except Exception: pass
+class F1EventWindow(tk.Toplevel):
+    """A Grand Prix: circuit facts, weekend schedule, this year's result and every past winner there (Jolpica-F1 data)."""
+    def __init__(self, dash, race):
+        super().__init__(dash)
+        self.dash = dash; self.race = dict(race); self._closed = False
+        self.title(f"{race.get('season', '')} {race.get('name', '')}")
+        self.configure(bg=GUI_BG); self.geometry("860x680"); self.minsize(520, 340)
+        hdr = tk.Frame(self, bg=GUI_PANEL); hdr.pack(fill="x")
+        tk.Label(hdr, text=f"🏁  {race.get('name', '')}", font=(UI_FONT, _fs(16), "bold"), fg=GUI_TEXT, bg=GUI_PANEL, anchor="w").pack(fill="x", padx=16, pady=(12, 0))
+        tk.Label(hdr, text=f"{race.get('season', '')}  ·  round {race.get('round', '')}  ·  {race.get('circuit', '')}", font=(UI_FONT, _fs(10)), fg=GUI_MUTED, bg=GUI_PANEL,
+                 anchor="w").pack(fill="x", padx=16, pady=(0, 10))
+        bar = tk.Frame(self, bg=GUI_BG); bar.pack(side="bottom", fill="x", padx=10, pady=8)
+        tk.Button(bar, text="📋 Copy all", command=lambda: copy_to_clipboard(self, page_text(self)), font=(UI_FONT, _fs(9)), fg=GUI_TEXT, bg=GUI_PANEL, relief="flat",
+                  cursor="hand2", padx=8).pack(side="right")
+        frame = tk.Frame(self, bg=GUI_BG); frame.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        sb = ttk.Scrollbar(frame, orient="vertical")
+        self._text = tk.Text(frame, font=("Consolas", int(opt("detail_font_size"))), bg="#0A0E14", fg=GUI_TEXT, relief="flat", wrap="none", yscrollcommand=sb.set,
+                             state="disabled", padx=10, pady=8)
+        sb.config(command=self._text.yview); sb.pack(side="right", fill="y"); self._text.pack(side="left", fill="both", expand=True)
+        self._text.tag_configure("cat", foreground=GUI_GREEN, font=("Consolas", int(opt("detail_font_size")) + 2, "bold"))
+        self._text.tag_configure("note", foreground=GUI_MUTED)
+        self._paint([("cat", "Loading history..."), ("note", "")])
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        try: self.dash.watch_popout(self)
+        except Exception: pass
+        threading.Thread(target=self._load, daemon=True).start()
+    def _load(self):
+        race = self.race
+        try:
+            past = race.get("date", "9999") <= datetime.date.today().isoformat()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_res = pool.submit(fetch_f1_race_results, race.get("season"), race.get("round")) if past else None
+                f_his = pool.submit(fetch_f1_history, race.get("circuit_id", ""))
+                results = f_res.result() if f_res else []; history = f_his.result()
+            secs = build_f1_event_sections(race, results, history)
+            if not history:
+                secs.append(("note", "No history found for this circuit (the free Jolpica-F1 service may be unreachable)."))
+        except Exception as exc:
+            secs = [("note", f"Could not load this race ({type(exc).__name__}).")]
+        try: self.after(0, lambda: self._paint(secs))
+        except Exception: pass
+    def _paint(self, secs):
+        if self._closed:
+            return
+        t = self._text
+        t.config(state="normal"); t.delete("1.0", "end")
+        for kind, text in secs:
+            t.insert("end", text + ("\n" if kind != "table" else "\n\n"), "cat" if kind == "cat" else ("note" if kind == "note" else ""))
+        t.config(state="disabled")
+    def close(self):
+        self._closed = True
+        try: self.dash._f1_windows.pop((self.race.get("season"), self.race.get("round")), None)
+        except Exception: pass
+        try: self.destroy()
+        except Exception: pass
+class F1EntityWindow(tk.Toplevel):
+    """A Formula 1 driver or constructor: this season, career totals and every season (Jolpica-F1 data)."""
+    def __init__(self, dash, kind, ent_id, name):
+        super().__init__(dash)
+        self.dash = dash; self.kind = kind; self.ent_id = ent_id; self._closed = False
+        self.title(name or ent_id)
+        self.configure(bg=GUI_BG); self.geometry("820x640"); self.minsize(520, 340)
+        hdr = tk.Frame(self, bg=GUI_PANEL); hdr.pack(fill="x")
+        tk.Label(hdr, text=f"{'🏎' if kind == 'driver' else '🏁'}  {name}", font=(UI_FONT, _fs(16), "bold"), fg=GUI_TEXT, bg=GUI_PANEL, anchor="w").pack(fill="x", padx=16, pady=(12, 10))
+        bar = tk.Frame(self, bg=GUI_BG); bar.pack(side="bottom", fill="x", padx=10, pady=8)
+        tk.Button(bar, text="📋 Copy all", command=lambda: copy_to_clipboard(self, page_text(self)), font=(UI_FONT, _fs(9)), fg=GUI_TEXT, bg=GUI_PANEL, relief="flat",
+                  cursor="hand2", padx=8).pack(side="right")
+        frame = tk.Frame(self, bg=GUI_BG); frame.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        sb = ttk.Scrollbar(frame, orient="vertical")
+        self._text = tk.Text(frame, font=("Consolas", int(opt("detail_font_size"))), bg="#0A0E14", fg=GUI_TEXT, relief="flat", wrap="none", yscrollcommand=sb.set,
+                             state="disabled", padx=10, pady=8)
+        sb.config(command=self._text.yview); sb.pack(side="right", fill="y"); self._text.pack(side="left", fill="both", expand=True)
+        self._text.tag_configure("cat", foreground=GUI_GREEN, font=("Consolas", int(opt("detail_font_size")) + 2, "bold"))
+        self._text.tag_configure("note", foreground=GUI_MUTED)
+        self._paint([("note", "Loading...")])
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        try: self.dash.watch_popout(self)
+        except Exception: pass
+        threading.Thread(target=self._load, daemon=True).start()
+    def _load(self):
+        try:
+            d = fetch_f1_driver(self.ent_id) if self.kind == "driver" else fetch_f1_constructor(self.ent_id)
+            secs = build_f1_entity_sections(self.kind, d) if (d.get("name") or d.get("seasons")) else [("note", "No history found (the free Jolpica-F1 service may be unreachable).")]
+        except Exception as exc:
+            secs = [("note", f"Could not load ({type(exc).__name__}).")]
+        try: self.after(0, lambda: self._paint(secs))
+        except Exception: pass
+    def _paint(self, secs):
+        if self._closed:
+            return
+        t = self._text
+        t.config(state="normal"); t.delete("1.0", "end")
+        for kind, text in secs:
+            t.insert("end", text + ("\n" if kind != "table" else "\n\n"), "cat" if kind == "cat" else ("note" if kind == "note" else ""))
+        t.config(state="disabled")
+    def close(self):
+        self._closed = True
+        try: self.dash._f1_windows.pop((self.kind, self.ent_id), None)
+        except Exception: pass
+        try: self.destroy()
+        except Exception: pass
 class TeamPage(tk.Toplevel):
     """One team: logo, record, place in its division, every game this season (click a result for its play-by-play)."""
-    def __init__(self, dash, sport, row, standing_text=""):
+    def __init__(self, dash, sport, row, standing_text="", season=None):
         super().__init__(dash)
-        self.dash = dash; self.sport = sport; self.row = dict(row); self.standing_text = standing_text
+        self.dash = dash; self.sport = sport; self.row = dict(row); self.standing_text = standing_text; self._season = season
         self._closed = False; self._shown = False; self._data = None; self._games = {}
         self.title(f"{row.get('name') or row.get('abbr')}  —  {_ALL_SPORTS_SETTINGS.get(sport, sport)}")
         self.configure(bg=GUI_BG)
@@ -2831,6 +3294,13 @@ class TeamPage(tk.Toplevel):
         self._name = tk.Label(info, text="", font=(UI_FONT, _fs(18), "bold"), fg=GUI_TEXT, bg=GUI_PANEL, anchor="w"); self._name.pack(fill="x")
         self._record = tk.Label(info, text="", font=(UI_FONT, _fs(12), "bold"), fg=GUI_GREEN, bg=GUI_PANEL, anchor="w"); self._record.pack(fill="x")
         self._standing = tk.Label(info, text="", font=(UI_FONT, _fs(10)), fg=GUI_MUTED, bg=GUI_PANEL, anchor="w"); self._standing.pack(fill="x")
+        srow = tk.Frame(info, bg=GUI_PANEL); srow.pack(fill="x", pady=(6, 0))
+        tk.Label(srow, text="Season:", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL).pack(side="left")
+        self._season_opts = season_options(self.sport)
+        self._season_combo = ttk.Combobox(srow, values=[l for l, _p in self._season_opts], state="readonly", font=(UI_FONT, _fs(9)), width=9)
+        cur = next((l for l, p in self._season_opts if p == self._season), self._season_opts[0][0])
+        self._season_combo.set(cur); self._season_combo.pack(side="left", padx=6)
+        self._season_combo.bind("<<ComboboxSelected>>", lambda e: self._on_season_change())
         bar = tk.Frame(self, bg=GUI_BG); bar.pack(side="bottom", fill="x", padx=10, pady=8)
         self._status = tk.Label(bar, text="", font=(UI_FONT, _fs(8)), fg=GUI_MUTED, bg=GUI_BG); self._status.pack(side="left")
         tk.Button(bar, text="⟳ Refresh", command=lambda: self._load(force=True), font=(UI_FONT, _fs(9)), fg=GUI_TEXT, bg=GUI_PANEL,
@@ -2917,27 +3387,30 @@ class TeamPage(tk.Toplevel):
                 t.insert("end", f"  {label.ljust(width)}   {value.rjust(10)}   {rank}\n")
             t.insert("end", "\n")
         t.config(state="disabled")
+    def _on_season_change(self):
+        label = self._season_combo.get()
+        self._season = None if label == self._season_opts[0][0] else next((p for l, p in self._season_opts if l == label), None)
+        self.standing_text = ""
+        self._load(force=True)
     def _team_id(self):
         return self.row.get("id")
     def _load(self, force=False):
-        tid = self._team_id(); sport = self.sport
+        tid = self._team_id(); sport = self.sport; season = self._season
         if force:
-            _TEAM_CACHE.pop((sport, str(tid)), None)
+            _TEAM_CACHE.pop((sport, str(tid), season), None)
         def _do():
-            try:
-                data = fetch_team_schedule(sport, tid)
-            except Exception:
-                data = None
-            pil = None
-            url = ((data or {}).get("team") or {}).get("logo") or self.row.get("logo")
-            if url:
-                try: pil = (url, get_logo(url))
-                except Exception: pil = None
-            extra = {}
-            for key, fn in (("roster", lambda: fetch_team_roster(sport, tid)), ("stats", lambda: fetch_team_stats(sport, tid)),
-                            ("ranks", lambda: team_ranks(fetch_standings_cached(sport), tid, sport))):
-                try: extra[key] = fn()
-                except Exception: extra[key] = []
+            def safe(fn, default):
+                try: return fn()
+                except Exception: return default
+            with ThreadPoolExecutor(max_workers=4) as pool:           # schedule, roster, stats and rankings all at once
+                f_sched = pool.submit(safe, lambda: fetch_team_schedule(sport, tid, season=season), None)
+                f_ros = pool.submit(safe, lambda: fetch_team_roster(sport, tid, season=season), [])
+                f_stats = pool.submit(safe, lambda: fetch_team_stats(sport, tid, season=season), [])
+                f_rank = pool.submit(safe, lambda: team_ranks(fetch_standings_cached(sport, season=season), tid, sport), [])
+                data = f_sched.result()
+                url = ((data or {}).get("team") or {}).get("logo") or self.row.get("logo")
+                pil = safe(lambda: (url, get_logo(url)), None) if url else None
+                extra = {"roster": f_ros.result(), "stats": f_stats.result(), "ranks": f_rank.result()}
             try: self.after(0, lambda: self._finish(data, pil, extra=extra))
             except Exception: pass
         threading.Thread(target=_do, daemon=True).start()
@@ -2970,9 +3443,10 @@ class TeamPage(tk.Toplevel):
         games = (data or {}).get("games") or []
         kind = sport_kind(self.sport)
         self._name.config(text=team.get("name") or self.row.get("name") or self.row.get("abbr", ""))
-        record = team.get("record") or team_record_text(games, self._team_id(), kind) or self.row.get("stats", {}).get("W", "")
+        record = ((team.get("record") if self._season is None else "") or team_record_text(games, self._team_id(), kind)
+                  or (self.row.get("stats", {}).get("W", "") if self._season is None else ""))
         self._record.config(text=f"Record  {record}" if record else "")
-        standing = self.standing_text or team.get("standing") or ""
+        standing = self.standing_text or ((team.get("standing") if self._season is None else "") or "")
         self._standing.config(text=standing)
         url = team.get("logo") or self.row.get("logo")
         photo = self.dash._logo_photo(url, int(opt("detail_logo_size")) + 24) if url else None
@@ -2994,7 +3468,7 @@ class TeamPage(tk.Toplevel):
             return loc.strftime("%b %d") if not with_time else f"{loc.strftime('%b %d')}  {_fmt_clock_time(dt)}"
         for g in reversed(finals):
             res, mine, theirs, opp, where = team_result(g, tid)
-            iid = self._trees["results"].insert("", "end", values=(when(g), f"{where} {opp}", f"{res}  {mine}–{theirs}"), tags=(res,))
+            iid = self._trees["results"].insert("", "end", values=(when(g), f"{where} {opp}", team_result_text(g, tid)), tags=(res,))
             self._games[("results", iid)] = g
         for g in rest:
             home = str(g.get("home_team_id")) == str(tid)
@@ -3091,8 +3565,10 @@ class GameDetailWindow(tk.Toplevel):
         self._poss_canvas = tk.Canvas(hdr, height=20, bg=GUI_PANEL, highlightthickness=0)
         self._poss_canvas.bind("<Configure>", lambda e: self._draw_possession())
         self._score_frame = tk.Frame(self, bg=GUI_BG)
-        tk.Label(self._score_frame, text="SCORING", font=(UI_FONT, _fs(9), "bold"), fg=GUI_MUTED, bg=GUI_BG,
-                 anchor="w").pack(fill="x", pady=(0, 2))
+        self._score_title = tk.Label(self._score_frame, text="SCORING", font=(UI_FONT, _fs(9), "bold"), fg=GUI_MUTED, bg=GUI_BG, anchor="w")
+        self._score_title.pack(fill="x", pady=(0, 2))
+        self._margin_canvas = tk.Canvas(self._score_frame, height=160, bg="#0A0E14", highlightthickness=0); self._margin = None
+        self._margin_canvas.bind("<Configure>", lambda e: self._draw_margin())
         self._score_text = tk.Text(self._score_frame, font=(UI_FONT, _fs(10)), bg="#0A0E14", fg=GUI_TEXT, relief="flat",
                                    wrap="none", height=3, state="disabled", padx=10, pady=6)
         self._score_text.pack(fill="x")
@@ -3264,7 +3740,7 @@ class GameDetailWindow(tk.Toplevel):
                 when = dt.astimezone().strftime("%b %d") if isinstance(dt, datetime.datetime) else ""
                 tag = f"{side}{n}"
                 start = t.index("end-1c")
-                t.insert("end", f"{res}  {mine}–{theirs}", res)
+                t.insert("end", team_result_text(it["game"], self.game.get(f"{side}_team_id")), res)
                 t.insert("end", f"   {where} {opp}   {when}\n")
                 t.tag_configure(tag, underline=False)
                 t.tag_add(tag, start, t.index("end-1c"))
@@ -3276,6 +3752,13 @@ class GameDetailWindow(tk.Toplevel):
         items = (detail or {}).get("scoring") or []
         if not opt("detail_show_scoring") or (not items and self.game.get("game_state") == "upcoming"):
             self._score_frame.pack_forget(); return
+        m = (detail or {}).get("margin")
+        if m and not hidden:                                 # basketball: one chart instead of a wall of baskets
+            self._score_text.pack_forget(); self._score_title.config(text="SCORE MARGIN  (0 = tied, up = the team on top leads)")
+            self._margin = m; self._margin_canvas.pack(fill="x"); self._draw_margin()
+            self._score_frame.pack(fill="x", padx=8, pady=(8, 0), after=self._hdr)
+            return
+        self._margin_canvas.pack_forget(); self._score_text.pack(fill="x"); self._score_title.config(text="SCORING")
         t = self._score_text
         t.config(state="normal"); t.delete("1.0", "end")
         if hidden:
@@ -3293,6 +3776,10 @@ class GameDetailWindow(tk.Toplevel):
                 t.insert("end", "\n")
         t.config(height=max(1, min(rows, int(opt("detail_scoring_lines")))), state="disabled")
         self._score_frame.pack(fill="x", padx=8, pady=(8, 0), after=self._hdr)
+    def _draw_margin(self):
+        if self._margin:
+            try: draw_margin_chart(self._margin_canvas, self._margin, self.game)
+            except Exception: pass
     def _paint_players(self, detail):
         t = self._players_text
         t.config(state="normal"); t.delete("1.0", "end")
@@ -4312,6 +4799,23 @@ def summary_game_over(data):
         if _GAME_OVER_RE.search(text) or _GAME_OVER_TYPE_RE.search(typ.strip()):
             return True, "'End of Game' is the latest entry in the play-by-play"
     return False, ""
+_FINISH_TS = {}
+_TYPICAL_HOURS = {"football": 3.3, "basketball": 2.4, "baseball": 3.1, "hockey": 2.7, "lacrosse": 2.3, "soccer": 2.1}
+def finish_time(g):
+    """When a game ended: the moment the app saw it end, else its start plus a typical length for the sport."""
+    ts = _FINISH_TS.get(g.get("id"))
+    if ts:
+        return ts
+    dt = g.get("start_dt")
+    return dt.timestamp() + _TYPICAL_HOURS.get(sport_kind(g.get("sport", "")), 2.5) * 3600 if isinstance(dt, datetime.datetime) else 0.0
+def record_finish_times(games, prev_states, now=None):
+    now = time.time() if now is None else now
+    for g in games:
+        gid = g.get("id")
+        if g.get("game_state") == "final" and gid not in _FINISH_TS and (prev_states.get(gid) or {}).get("game_state") == "live":
+            _FINISH_TS[gid] = now
+    while len(_FINISH_TS) > 3000:
+        _FINISH_TS.pop(next(iter(_FINISH_TS)))
 def apply_score_overrides(games):
     """Re-apply a corrected final score until ESPN's scoreboard catches up with it."""
     now = time.time()
@@ -4352,14 +4856,16 @@ def _looks_like_score(p, kind):
     rx = _SCORE_TYPE_RE.get(kind)
     return bool(rx and rx.search(blob) and not _NOT_SCORE_RE.search(blob))
 def _all_plays_in_order(data):
-    plays = [p for p in (data.get("plays") or []) if isinstance(p, dict)]
-    if not plays:
-        drives = data.get("drives") if isinstance(data.get("drives"), dict) else {}
-        for key in ("previous", "current"):
-            block = drives.get(key)
-            for drive in (block if isinstance(block, list) else [block] if isinstance(block, dict) else []):
-                plays.extend(p for p in ((drive or {}).get("plays") or []) if isinstance(p, dict))
-    return plays
+    """Every play ESPN gave us. Some summaries carry the plays in two places (a short 'plays' list and the full drives);
+    the longer list wins, so nothing is lost."""
+    flat = [p for p in (data.get("plays") or []) if isinstance(p, dict)]
+    drives = data.get("drives") if isinstance(data.get("drives"), dict) else {}
+    from_drives = []
+    for key in ("previous", "current"):
+        block = drives.get(key)
+        for drive in (block if isinstance(block, list) else [block] if isinstance(block, dict) else []):
+            from_drives.extend(p for p in ((drive or {}).get("plays") or []) if isinstance(p, dict))
+    return from_drives if len(from_drives) > len(flat) else flat
 def _play_team_ids(p):
     ids = set()
     team = p.get("team")
@@ -4708,6 +5214,8 @@ def standing_color_key(sport, kind, rank, n, note="", notes_known=False):
     Conference yellow and relegation red where those exist."""
     if kind == "wildcard":
         return "po"                                   # wild-card rows are playoff spots by definition
+    if sport == "f1":
+        return "gold" if rank == 1 else "plain"      # the championship leader
     rule = PLAYOFF_RULES.get(sport)
     if rule:
         return "po" if rank <= rule[1] else "plain"
@@ -4836,6 +5344,8 @@ def project_bracket(sport, st):
         rounds = []
     return {"rounds": [r for r in rounds if r["ties"]], "projected": True, "title": "If the season ended today"}
 def fetch_standings(sport, season=None):
+    if sport == "f1":
+        return fetch_f1_standings(season)
     path = STANDINGS_PATH.get(sport)
     empty = {"columns": [], "groups": [], "mode": "table"}
     if not path:
@@ -4849,15 +5359,19 @@ def fetch_standings(sport, season=None):
         if isinstance(data, dict):
             _standings_nodes(data, [], 0, nodes)
         return data if nodes else None
+    conf_box = {}
+    def _conf():                      # the conference tables (for wild cards) are fetched at the same time as the main page
+        if mode == "division" and sport in WILDCARD_SLOTS:
+            conf_box["v"] = _try(f"{base}?type=0&level=2&sort=playoffseed:asc") or _try(f"{base}?type=0&level=2")
+    t_conf = threading.Thread(target=_conf, daemon=True); t_conf.start()
     main = None
     if mode in _STANDINGS_LEVEL:      # seed-ordered first, then plain, so a rejected sort parameter never costs us the page
         lvl = _STANDINGS_LEVEL[mode]
         main = _try(f"{base}?type=0&level={lvl}&sort=playoffseed:asc") or _try(f"{base}?type=0&level={lvl}")
     if not main:
         main = json_get(f"https://site.api.espn.com/apis/v2/sports/{path}/standings" + (f"?season={season}" if season else ""), timeout=10)
-    conf = None
-    if mode == "division" and sport in WILDCARD_SLOTS:
-        conf = _try(f"{base}?type=0&level=2&sort=playoffseed:asc") or _try(f"{base}?type=0&level=2")
+    t_conf.join(timeout=15)
+    conf = conf_box.get("v")
     try:
         return build_standings(main, conf, sport)
     except Exception:
@@ -5017,6 +5531,76 @@ def _final_result_text(game):
         winner = "DRAW"
     result = f"{away} {away_display} – {home} {home_display}"
     return f"{result} | {winner} WON" if winner != "DRAW" else f"{result} | DRAW"
+def basketball_period_len(sport):
+    """(seconds per period, regulation periods): college 2 x 20 min, WNBA / FIBA 4 x 10, everything else 4 x 12; overtime is 5 min."""
+    path = SPORT_PATH.get(sport, "")
+    if "college" in path:
+        return 1200, 2
+    if "wnba" in path or "fiba" in path or "euroleague" in path:
+        return 600, 4
+    return 720, 4
+def _bb_elapsed(p, sport):
+    length, reg = basketball_period_len(sport)
+    try: per = int((p.get("period") or {}).get("number") or 1)
+    except (TypeError, ValueError): per = 1
+    rem = (_clock_minutes((p.get("clock") or {}).get("displayValue")) or 0.0) * 60.0
+    plen = length if per <= reg else 300
+    start = (per - 1) * length if per <= reg else reg * length + (per - reg - 1) * 300
+    return start + max(0.0, plen - rem), per
+def margin_up_side(game):
+    """The side drawn above the zero line: my favorite team when exactly one of them is playing, otherwise the home team."""
+    mine = [sd for sd in ("home", "away") if _my_team_key(game.get("sport", ""), game.get(f"{sd}_abbr"))]
+    return mine[0] if len(mine) == 1 else "home"
+def margin_series(plays, game):
+    """The score difference through the game: {'series': [(seconds, home - away)], 'bounds': [(seconds, label of the period that ended)], 'up': side}."""
+    sport = game.get("sport", ""); length, reg = basketball_period_len(sport); half = _is_college_basketball(sport)
+    pts = [(0.0, 0, 1)]; maxper = 1
+    for p in plays:
+        try: hs, aw = int(p.get("homeScore")), int(p.get("awayScore"))
+        except (TypeError, ValueError): continue
+        t, per = _bb_elapsed(p, sport); maxper = max(maxper, per); pts.append((t, hs - aw, per))
+    pts.sort(key=lambda x: x[0])
+    bounds = []
+    for per in range(1, maxper):
+        end = per * length if per <= reg else reg * length + (per - reg) * 300
+        bounds.append((float(end), _period_short("basketball", {"period": {"number": per}}, half)))
+    return {"series": [(t, d) for t, d, _p in pts], "bounds": bounds, "up": margin_up_side(game)}
+def draw_margin_chart(c, data, game):
+    """A line chart of the score difference: 0 is the middle line, the line rises when the team on top leads, with a divider at each period."""
+    c.delete("all")
+    w = max(int(c.winfo_width()), 420); h = max(int(c.winfo_height()), 150)
+    series = (data or {}).get("series") or []
+    if len(series) < 2:
+        c.create_text(w // 2, h // 2, text="No scoring yet", fill=GUI_MUTED, font=(UI_FONT, _fs(10))); return
+    up = data.get("up", "home"); sign = 1 if up == "home" else -1
+    vals = [sign * d for _t, d in series]
+    peak = max(10, max(abs(v) for v in vals)); peak = ((peak + 4) // 5) * 5
+    pl, pr, pt, pb = 46, 74, 16, 20
+    pw, ph = w - pl - pr, h - pt - pb; mid = pt + ph / 2.0
+    tmax = max(series[-1][0], max((b[0] for b in data.get("bounds", [])), default=0.0), 1.0)
+    X = lambda t: pl + pw * (t / tmax)
+    Y = lambda v: mid - (v / float(peak)) * (ph / 2.0)
+    for g_ in range(-peak, peak + 1, 10 if peak <= 40 else 20):
+        if g_:
+            c.create_line(pl, Y(g_), pl + pw, Y(g_), fill="#1B2330")
+            c.create_text(pl - 6, Y(g_), text=f"{abs(g_)}", fill=GUI_MUTED, anchor="e", font=(UI_FONT, _fs(8)))
+    for t, label in data.get("bounds", []):
+        c.create_line(X(t), pt, X(t), pt + ph, fill="#2A3342", dash=(3, 3))
+        c.create_text(X(t) + 3, pt + 2, text=label, fill=GUI_MUTED, anchor="nw", font=(UI_FONT, _fs(8)))
+    c.create_line(pl, mid, pl + pw, mid, fill="#8B98A9", width=2)
+    ab, hb = game.get("away_abbr", "AWAY"), game.get("home_abbr", "HOME")
+    top_abbr, bot_abbr = (hb, ab) if up == "home" else (ab, hb)
+    c.create_text(pl + pw + 8, pt + 4, text=f"▲ {top_abbr}", fill=GUI_GREEN, anchor="nw", font=(UI_FONT, _fs(9), "bold"))
+    c.create_text(pl + pw + 8, pt + ph - 4, text=f"▼ {bot_abbr}", fill="#FF6B6B", anchor="sw", font=(UI_FONT, _fs(9), "bold"))
+    prev_t, prev_v = series[0][0], vals[0]
+    for (t, _d), v in zip(series[1:], vals[1:]):
+        col = GUI_GREEN if prev_v >= 0 else "#FF6B6B"
+        c.create_line(X(prev_t), Y(prev_v), X(t), Y(prev_v), fill=col, width=2)
+        c.create_line(X(t), Y(prev_v), X(t), Y(v), fill=GUI_GREEN if v >= 0 else "#FF6B6B", width=2)
+        prev_t, prev_v = t, v
+    last = vals[-1]
+    who = top_abbr if last > 0 else (bot_abbr if last < 0 else "")
+    c.create_text(X(prev_t) + 6, Y(prev_v), text=(f"{who} +{abs(last)}" if last else "Tied"), fill=GUI_TEXT, anchor="w", font=(UI_FONT, _fs(9), "bold"))
 def _is_college_basketball(sport):
     return sport_kind(sport) == "basketball" and "college" in SPORT_PATH.get(sport, "")
 def period_str(sport, p):
@@ -5237,6 +5821,447 @@ def mark_seen(key):
         if len(_seen_plays) > _SEEN_MAX:
             to_remove = list(_seen_plays)[:_SEEN_MAX//2]
             for k in to_remove: _seen_plays.discard(k)
+# ============================================================================
+#  RACES, TOURNAMENTS, FIGHTS  —  sports without a running score: start / finish alerts only
+# ============================================================================
+EVENT_SPORTS = {"f1": ("Formula 1", "racing/f1", "F1"), "indycar": ("IndyCar", "racing/irl", "IND"), "nascar": ("NASCAR Cup", "racing/nascar-premier", "NSC"),
+                "pga": ("PGA Tour", "golf/pga", "PGA"), "lpga": ("LPGA Tour", "golf/lpga", "LPG"), "atp": ("ATP Tour", "tennis/atp", "ATP"),
+                "wta": ("WTA Tour", "tennis/wta", "WTA"), "ufc": ("UFC", "mma/ufc", "UFC")}
+SESSION_NAMES = {"fp1": "Practice 1", "fp2": "Practice 2", "fp3": "Practice 3", "qual": "Qualifying", "q": "Qualifying", "sq": "Sprint Qualifying", "ss": "Sprint Shootout",
+                 "sprint": "Sprint", "race": "Race", "pole": "Pole Qualifying", "prac": "Practice", "warmup": "Warm-up", "final": "Final"}
+_EVENT_CACHE = {}
+def parse_event_sessions(data, key):
+    """Sessions (practice, qualifying, race ...) of the race weekends / tournaments in an ESPN scoreboard response."""
+    out = []
+    for ev in ((data.get("events") if isinstance(data, dict) else None) or []):
+        if not isinstance(ev, dict):
+            continue
+        ename = str(ev.get("name") or ev.get("shortName") or ""); eid = str(ev.get("id") or "")
+        comps = [c for c in (ev.get("competitions") or []) if isinstance(c, dict)] or [dict(ev, type={})]
+        for c in comps:
+            ctype = c.get("type") if isinstance(c.get("type"), dict) else {}
+            raw = str(ctype.get("abbreviation") or ctype.get("text") or ctype.get("name") or "").strip()
+            label = SESSION_NAMES.get(raw.lower().replace(" ", ""), raw) or ("Event" if len(comps) == 1 else "Session")
+            status = c.get("status") if isinstance(c.get("status"), dict) else (ev.get("status") if isinstance(ev.get("status"), dict) else {})
+            st = status.get("type") if isinstance(status.get("type"), dict) else {}
+            state = str(st.get("state") or ("post" if st.get("completed") else "pre")).lower()
+            podium = []
+            comp = sorted([x for x in (c.get("competitors") or []) if isinstance(x, dict)], key=lambda x: _to_int(x.get("order") or x.get("place") or x.get("rank") or 999, 999))
+            for x in comp[:3]:
+                who = x.get("athlete") if isinstance(x.get("athlete"), dict) else (x.get("team") if isinstance(x.get("team"), dict) else {})
+                name = str(who.get("displayName") or who.get("shortDisplayName") or who.get("fullName") or "")
+                if name: podium.append(name)
+            out.append({"series": key, "event": ename, "event_id": eid, "id": f"{key}:{eid}:{c.get('id') or raw or len(out)}", "label": label,
+                        "start": _iso_dt(c.get("date") or c.get("startDate") or ev.get("date")), "state": state if state in ("pre", "in", "post") else "pre",
+                        "detail": str(st.get("detail") or st.get("shortDetail") or ""), "podium": podium if state == "post" else []})
+    return out
+def fetch_event_sessions(key, max_age=60, dates=None):
+    """Sessions of the current race weekend / tournament (or of a month: dates='YYYYMM')."""
+    ck = (key, dates); cached = _EVENT_CACHE.get(ck)
+    if cached and time.time() - cached[0] < max_age:
+        return cached[1]
+    spec = EVENT_SPORTS.get(key)
+    if not spec:
+        return []
+    data = json_get(f"https://site.api.espn.com/apis/site/v2/sports/{spec[1]}/scoreboard" + (f"?dates={dates}" if dates else ""), timeout=12)
+    if not isinstance(data, dict):
+        return cached[1] if cached else []
+    out = parse_event_sessions(data, key)
+    _EVENT_CACHE[ck] = (time.time(), out)
+    return out
+_JOLPICA = "https://api.jolpi.ca/ergast/f1"
+_F1_CACHE = {}
+F1_TRACK_KM = {"albert_park": 5.278, "americas": 5.513, "bahrain": 5.412, "baku": 6.003, "catalunya": 4.657, "hungaroring": 4.381, "imola": 4.909, "interlagos": 4.309,
+               "jeddah": 6.174, "losail": 5.419, "marina_bay": 4.940, "miami": 5.412, "monaco": 3.337, "monza": 5.793, "red_bull_ring": 4.318, "rodriguez": 4.304,
+               "shanghai": 5.451, "silverstone": 5.891, "spa": 7.004, "suzuka": 5.807, "vegas": 6.201, "villeneuve": 4.361, "yas_marina": 5.281, "zandvoort": 4.259,
+               "madring": 5.470, "sepang": 5.543, "ricard": 5.842, "hockenheimring": 4.574, "nurburgring": 5.148, "sochi": 5.848, "istanbul": 5.338,
+               "yeongam": 5.615, "buddh": 5.125, "valencia": 5.419, "magny_cours": 4.411, "portimao": 4.653, "mugello": 5.245}
+def jolpica_get(path, params="", max_age=3600):
+    """MRData of one Jolpica-F1 request (free, no key; cached)."""
+    url = f"{_JOLPICA}/{path}.json" + (f"?{params}" if params else "")
+    c = _F1_CACHE.get(url)
+    if c and time.time() - c[0] < max_age:
+        return c[1]
+    data = json_get(url, timeout=15)
+    mr = data.get("MRData") if isinstance(data, dict) else None
+    if isinstance(mr, dict):
+        _F1_CACHE[url] = (time.time(), mr)
+        while len(_F1_CACHE) > 200:
+            _F1_CACHE.pop(next(iter(_F1_CACHE)))
+        return mr
+    return c[1] if c else None
+def _f1_driver_name(d):
+    return f"{(d or {}).get('givenName', '')} {(d or {}).get('familyName', '')}".strip()
+def fetch_f1_standings(season=None):
+    """Drivers' and Constructors' championship tables, in the shape the Standings page draws."""
+    season = season or "current"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fd = pool.submit(jolpica_get, f"{season}/driverstandings"); fc = pool.submit(jolpica_get, f"{season}/constructorstandings")
+        drivers, cons = fd.result(), fc.result()
+    groups = []
+    dl = ((drivers or {}).get("StandingsTable") or {}).get("StandingsLists") or []
+    drows = []
+    for e in (dl[0].get("DriverStandings") if dl else None) or []:
+        d = e.get("Driver") or {}; team = ((e.get("Constructors") or [{}])[-1]).get("name", "")
+        drows.append({"abbr": d.get("code") or str(d.get("familyName", ""))[:3].upper(), "name": _f1_driver_name(d), "id": d.get("driverId", ""), "note": "", "logo": "", "entity": "driver",
+                      "stats": {"TEAM": team, "W": str(e.get("wins", "")), "PTS": clean_stat(e.get("points", ""))}})
+    if drows:
+        groups.append({"name": "Drivers' Championship", "kind": "table", "rows": drows})
+    cl = ((cons or {}).get("StandingsTable") or {}).get("StandingsLists") or []
+    crows = []
+    for e in (cl[0].get("ConstructorStandings") if cl else None) or []:
+        c = e.get("Constructor") or {}
+        crows.append({"abbr": str(c.get("name", ""))[:3].upper(), "name": c.get("name", ""), "id": c.get("constructorId", ""), "note": "", "logo": "", "entity": "constructor",
+                      "stats": {"TEAM": "", "W": str(e.get("wins", "")), "PTS": clean_stat(e.get("points", ""))}})
+    if crows:
+        groups.append({"name": "Constructors' Championship", "kind": "table", "rows": crows})
+    return {"columns": ["TEAM", "W", "PTS"], "groups": groups, "mode": "table"} if groups else {"columns": [], "groups": [], "mode": "table"}
+def fetch_f1_calendar(season=None):
+    """Every round of a season (past and future) with its sessions, circuit and, for past races, the winner."""
+    season = season or "current"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fr = pool.submit(jolpica_get, f"{season}"); fw = pool.submit(jolpica_get, f"{season}/results/1", "limit=100")
+        races, wins = fr.result(), fw.result()
+    winners = {}
+    for r in ((wins or {}).get("RaceTable") or {}).get("Races") or []:
+        res = (r.get("Results") or [{}])[0]
+        winners[str(r.get("round"))] = f"{_f1_driver_name(res.get('Driver'))} ({(res.get('Constructor') or {}).get('name', '')})"
+    out = []
+    for r in ((races or {}).get("RaceTable") or {}).get("Races") or []:
+        circ = r.get("Circuit") or {}; loc = circ.get("Location") or {}
+        sessions = []
+        for key, label in (("FirstPractice", "Practice 1"), ("SecondPractice", "Practice 2"), ("ThirdPractice", "Practice 3"), ("SprintQualifying", "Sprint Qualifying"),
+                           ("Sprint", "Sprint"), ("Qualifying", "Qualifying")):
+            if isinstance(r.get(key), dict) and r[key].get("date"):
+                sessions.append((label, r[key].get("date"), r[key].get("time", "")))
+        sessions.append(("Race", r.get("date", ""), r.get("time", "")))
+        out.append({"season": _to_int(r.get("season"), 0), "round": _to_int(r.get("round"), 0), "name": r.get("raceName", ""), "circuit_id": circ.get("circuitId", ""),
+                    "circuit": circ.get("circuitName", ""), "locality": loc.get("locality", ""), "country": loc.get("country", ""), "date": r.get("date", ""),
+                    "time": r.get("time", ""), "sessions": sessions, "winner": winners.get(str(r.get("round")), "")})
+    return out
+_SESSION_MINUTES = {"Practice 1": 60, "Practice 2": 60, "Practice 3": 60, "Sprint Qualifying": 45, "Sprint": 40, "Qualifying": 60, "Race": 120}
+def f1_weekend_sessions(race, now=None):
+    """The sessions of one race weekend in the same shape as ESPN's (state guessed from the clock: before / during / after)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc); out = []
+    for label, d, t in race.get("sessions", []):
+        try:
+            start = datetime.datetime.strptime(f"{d} {str(t).rstrip('Z') or '12:00:00'}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            continue
+        end = start + datetime.timedelta(minutes=_SESSION_MINUTES.get(label, 60))
+        out.append({"series": "f1", "event": race.get("name", ""), "event_id": f"jp{race.get('season')}-{race.get('round')}", "id": f"f1:jp:{d}:{label}", "label": label, "start": start,
+                    "state": "pre" if now < start else ("in" if now < end else "post"), "detail": "", "podium": []})
+    return out
+def f1_next_race(calendar, today=None):
+    """The race weekend under way or coming up next (a race counts until the day after it)."""
+    today = today or datetime.date.today(); cutoff = (today - datetime.timedelta(days=1)).isoformat()
+    return next((r for r in calendar if r.get("date", "") >= cutoff and not (r.get("winner") and r.get("date", "") < today.isoformat())), None)
+def f1_current_weekend():
+    """(race, sessions): ESPN's live sessions when it has them, otherwise the schedule from Jolpica."""
+    try:
+        cal = fetch_f1_calendar(None); race = f1_next_race(cal)
+    except Exception:
+        cal, race = [], None
+    sessions = []
+    try: sessions = fetch_event_sessions("f1", max_age=30)
+    except Exception: pass
+    if not sessions and race:
+        sessions = f1_weekend_sessions(race)
+    return race, sessions
+def _jolpica_total(path):
+    mr = jolpica_get(path, "limit=1", max_age=6 * 3600)
+    return _to_int((mr or {}).get("total"), 0) if mr else 0
+def fetch_f1_driver(driver_id):
+    """A driver's history: season by season (team, position, points, wins) and career totals (starts, wins, podiums, poles ...)."""
+    jobs = {"info": lambda: jolpica_get(f"drivers/{driver_id}", max_age=24 * 3600), "standings": lambda: jolpica_get(f"drivers/{driver_id}/driverstandings", "limit=100", max_age=6 * 3600),
+            "starts": lambda: _jolpica_total(f"drivers/{driver_id}/results"), "wins": lambda: _jolpica_total(f"drivers/{driver_id}/results/1"),
+            "p2": lambda: _jolpica_total(f"drivers/{driver_id}/results/2"), "p3": lambda: _jolpica_total(f"drivers/{driver_id}/results/3"),
+            "poles": lambda: _jolpica_total(f"drivers/{driver_id}/qualifying/1"), "fastest": lambda: _jolpica_total(f"drivers/{driver_id}/fastest/1/results")}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futs = {k: pool.submit(fn) for k, fn in jobs.items()}
+        got = {k: f.result() for k, f in futs.items()}
+    drv = (((got["info"] or {}).get("DriverTable") or {}).get("Drivers") or [{}])[0]
+    seasons = []
+    for sl in (((got["standings"] or {}).get("StandingsTable") or {}).get("StandingsLists") or []):
+        e = (sl.get("DriverStandings") or [{}])[0]
+        seasons.append({"year": _to_int(sl.get("season"), 0), "pos": str(e.get("position", "")), "points": clean_stat(e.get("points", "")), "wins": str(e.get("wins", "")),
+                        "team": ", ".join(c.get("name", "") for c in (e.get("Constructors") or []))})
+    seasons.sort(key=lambda x: x["year"], reverse=True)
+    return {"name": _f1_driver_name(drv), "born": drv.get("dateOfBirth", ""), "nationality": drv.get("nationality", ""), "number": drv.get("permanentNumber", ""), "code": drv.get("code", ""),
+            "seasons": seasons, "titles": sum(1 for x in seasons if x["pos"] == "1"), "starts": got["starts"], "wins": got["wins"], "podiums": got["wins"] + got["p2"] + got["p3"],
+            "poles": got["poles"], "fastest": got["fastest"]}
+def fetch_f1_constructor(cid):
+    jobs = {"info": lambda: jolpica_get(f"constructors/{cid}", max_age=24 * 3600), "standings": lambda: jolpica_get(f"constructors/{cid}/constructorstandings", "limit=100", max_age=6 * 3600),
+            "wins": lambda: _jolpica_total(f"constructors/{cid}/results/1")}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futs = {k: pool.submit(fn) for k, fn in jobs.items()}
+        got = {k: f.result() for k, f in futs.items()}
+    con = (((got["info"] or {}).get("ConstructorTable") or {}).get("Constructors") or [{}])[0]
+    seasons = []
+    for sl in (((got["standings"] or {}).get("StandingsTable") or {}).get("StandingsLists") or []):
+        e = (sl.get("ConstructorStandings") or [{}])[0]
+        seasons.append({"year": _to_int(sl.get("season"), 0), "pos": str(e.get("position", "")), "points": clean_stat(e.get("points", "")), "wins": str(e.get("wins", ""))})
+    seasons.sort(key=lambda x: x["year"], reverse=True)
+    return {"name": con.get("name", ""), "nationality": con.get("nationality", ""), "seasons": seasons, "titles": sum(1 for x in seasons if x["pos"] == "1"), "wins": got["wins"]}
+def build_f1_entity_sections(kind, d):
+    """[(kind, text)] for a driver / constructor page: this season first, then career totals, season by season, About."""
+    out = []; seasons = d.get("seasons") or []
+    if seasons:
+        cur = seasons[0]
+        out.append(("cat", f"THIS SEASON  ({cur['year']})"))
+        rows = [f"  Championship position   {cur['pos']}", f"  Points                  {cur['points']}", f"  Wins                    {cur['wins']}"]
+        if kind == "driver" and cur.get("team"):
+            rows.insert(0, f"  Team                    {cur['team']}")
+        out.append(("table", "\n".join(rows)))
+    out.append(("cat", "CAREER"))
+    if kind == "driver":
+        tot = [("Championships", d.get("titles")), ("Races started", d.get("starts")), ("Wins", d.get("wins")), ("Podiums", d.get("podiums")), ("Pole positions", d.get("poles")), ("Fastest laps", d.get("fastest")),
+               ("Seasons", len(seasons))]
+    else:
+        tot = [("Constructors' titles", d.get("titles")), ("Race wins", d.get("wins")), ("Seasons", len(seasons))]
+    out.append(("table", "\n".join(f"  {k:<22}{v}" for k, v in tot)))
+    if seasons:
+        out.append(("cat", "SEASON BY SEASON"))
+        if kind == "driver":
+            out.append(("table", format_table(["Team", "Pos", "Pts", "Wins"], [(str(x["year"]), [x["team"], x["pos"], x["points"], x["wins"]]) for x in seasons], "Year")))
+        else:
+            out.append(("table", format_table(["Pos", "Pts", "Wins"], [(str(x["year"]), [x["pos"], x["points"], x["wins"]]) for x in seasons], "Year")))
+    about = [f"  {k:<14}{v}" for k, v in ((("Born", d.get("born")), ("Nationality", d.get("nationality")), ("Number", d.get("number")), ("Code", d.get("code"))) if kind == "driver"
+                                       else (("Nationality", d.get("nationality")),)) if v]
+    if about:
+        out.append(("cat", "ABOUT")); out.append(("table", "\n".join(about)))
+    return out
+def fetch_f1_race_results(season, rnd):
+    mr = jolpica_get(f"{season}/{rnd}/results", "limit=40")
+    races = ((mr or {}).get("RaceTable") or {}).get("Races") or []
+    rows = []
+    for e in (races[0].get("Results") if races else None) or []:
+        rows.append({"pos": str(e.get("positionText") or e.get("position") or ""), "driver": _f1_driver_name(e.get("Driver")), "team": (e.get("Constructor") or {}).get("name", ""),
+                     "result": str((e.get("Time") or {}).get("time") or e.get("status") or ""), "points": clean_stat(e.get("points", "")), "grid": str(e.get("grid") or "")})
+    return rows
+def fetch_f1_history(circuit_id):
+    """Every winner of a race at this circuit, oldest first."""
+    mr = jolpica_get(f"circuits/{circuit_id}/results/1", "limit=100", max_age=6 * 3600)
+    out = []
+    for r in ((mr or {}).get("RaceTable") or {}).get("Races") or []:
+        res = (r.get("Results") or [{}])[0]
+        out.append({"year": _to_int(r.get("season"), 0), "name": r.get("raceName", ""), "driver": _f1_driver_name(res.get("Driver")), "team": (res.get("Constructor") or {}).get("name", ""),
+                    "time": str((res.get("Time") or {}).get("time") or ""), "grid": str(res.get("grid") or "")})
+    out.sort(key=lambda x: x["year"])
+    return out
+def f1_history_stats(history):
+    """Facts from the winners list: races held, first / last year, who won most there."""
+    if not history:
+        return {}
+    import collections as _c
+    d = _c.Counter(h["driver"] for h in history); t = _c.Counter(h["team"] for h in history)
+    return {"races": len(history), "first": history[0]["year"], "last": history[-1]["year"], "last_winner": history[-1]["driver"],
+            "top_drivers": d.most_common(3), "top_teams": t.most_common(3)}
+def build_f1_event_sections(race, results, history):
+    """[(kind, text)] for the Grand Prix page: circuit facts, weekend schedule, this year's result, past winners."""
+    out = [("cat", f"{race.get('season', '')} {race.get('name', '')}  —  round {race.get('round', '')}")]
+    km = F1_TRACK_KM.get(race.get("circuit_id", ""))
+    facts = [f"  Circuit      {race.get('circuit', '')}", f"  Location     {', '.join(x for x in (race.get('locality'), race.get('country')) if x)}"]
+    if km:
+        facts.append(f"  Lap length   {km:.3f} km  ({km * 0.621371:.3f} mi)   (approx.)")
+    st = f1_history_stats(history)
+    if st:
+        facts.append(f"  History      {st['races']} Grands Prix here, {st['first']}–{st['last']}   (last winner: {st['last_winner']})")
+        facts.append("  Most wins    drivers: " + ", ".join(f"{n} {c}" for n, c in st["top_drivers"]))
+        facts.append("               teams:   " + ", ".join(f"{n} {c}" for n, c in st["top_teams"]))
+    out.append(("table", "\n".join(facts)))
+    if race.get("sessions"):
+        out.append(("cat", "WEEKEND SCHEDULE"))
+        out.append(("table", "\n".join(f"  {label:<20}{when}" for label, when in (
+            (l, _f1_when(d, t)) for l, d, t in race["sessions"]))))
+    if results:
+        out.append(("cat", "RESULT"))
+        out.append(("table", format_table(["Grid", "Team", "Time / status", "Pts"], [(f"{r['pos']:>3}  {r['driver']}", [r["grid"], r["team"], r["result"], r["points"]]) for r in results], "Pos  Driver")))
+    if history:
+        out.append(("cat", "PAST WINNERS AT THIS CIRCUIT"))
+        out.append(("table", format_table(["Team", "Time", "Grid"], [(f"{h['year']}  {h['driver']}", [h["team"], h["time"], h["grid"]]) for h in reversed(history)], "Year  Winner")))
+    return out
+def _f1_when(date_s, time_s):
+    try:
+        dt = datetime.datetime.strptime(f"{date_s} {str(time_s).rstrip('Z') or '00:00:00'}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone().strftime("%a %b %d  ") + _fmt_clock_time(dt)
+    except Exception:
+        return str(date_s or "")
+def event_alerts(sessions, last_states, done, now_dt, soon_min=15, want=(True, True, True)):
+    """Alerts for sessions: starting soon / started / finished. `last_states` = what we saw last time, `done` = alert keys already sent."""
+    alerts = []; new_states = dict(last_states)
+    for s_ in sessions:
+        sid, st = s_["id"], s_["state"]; prev = last_states.get(sid); name = f"{s_['event']} — {s_['label']}".strip(" —")
+        when = _fmt_clock_time(s_["start"]) if isinstance(s_.get("start"), datetime.datetime) else ""
+        day = s_["start"].strftime("%Y%m%d") if isinstance(s_.get("start"), datetime.datetime) else ""
+        sig = lambda kind: f"{s_['series']}|{kind}|{s_['label']}|{day}"          # the same session from two sources alerts once
+        if want[0] and st == "pre" and isinstance(s_.get("start"), datetime.datetime):
+            mins = (s_["start"] - now_dt).total_seconds() / 60.0
+            if 0 < mins <= soon_min and f"soon:{sid}" not in done and sig("soon") not in done:
+                alerts.append({"key": f"soon:{sid}", "sig": sig("soon"), "icon": "⏱", "label": f"{s_['label'].upper()} IN {max(1, int(round(mins)))} MIN",
+                               "text": f"{name}  ·  starts at {when}", "series": s_["series"]})
+        if want[1] and st == "in" and prev == "pre" and f"start:{sid}" not in done and sig("start") not in done:
+            alerts.append({"key": f"start:{sid}", "sig": sig("start"), "icon": "🏁", "label": f"{s_['label'].upper()} HAS STARTED", "text": name, "series": s_["series"]})
+        if want[2] and st == "post" and prev in ("pre", "in") and f"end:{sid}" not in done and sig("end") not in done:
+            pod = "   ".join(f"{i + 1}. {n}" for i, n in enumerate(s_["podium"]))
+            alerts.append({"key": f"end:{sid}", "sig": sig("end"), "icon": "🏆", "label": f"{s_['label'].upper()} FINISHED", "text": name + (f"  ·  {pod}" if pod else ""), "series": s_["series"]})
+        new_states[sid] = st
+    return alerts, new_states
+# ============================================================================
+#  FAVORITE-TEAM SPECIAL ALERTS  —  what matters in each sport, with the stats behind it
+# ============================================================================
+_PEN_MIN_RE = re.compile(r"(\d+)\s*(?:min|minute)", re.I)
+def _other_side(side):
+    return "away" if side == "home" else "home"
+def _hockey_elapsed(p):
+    try:
+        per = int((p.get("period") or {}).get("number") or 1)
+        rem = _clock_minutes((p.get("clock") or {}).get("displayValue")) or 0.0
+        return (per - 1) * 1200 + (1200 - rem * 60)
+    except Exception:
+        return 0.0
+def hockey_special_teams(plays, game, fav_side):
+    """Power plays / penalty kills for one side from the play list. Returns (events, stats, active)."""
+    ids = {"home": str(game.get("home_team_id") or ""), "away": str(game.get("away_team_id") or "")}
+    fav_id = ids[fav_side]; abbr = game.get(f"{fav_side}_abbr", "")
+    windows = []; events = []; st = {"pp_opps": 0, "pp_goals": 0, "pk_opps": 0, "pk_allowed": 0}; last = 0.0
+    for p in plays:
+        t = _hockey_elapsed(p); last = max(last, t)
+        ptype = str((p.get("type") or {}).get("text") or "").lower() if isinstance(p.get("type"), dict) else ""
+        text = clean_play_text(p.get("text") or "", 160)
+        tid = str(((p.get("team") or {}) if isinstance(p.get("team"), dict) else {}).get("id") or "")
+        if "penalty" in ptype and "shot" not in ptype and "served" not in ptype and tid in ids.values():
+            m = _PEN_MIN_RE.search(str(p.get("text") or "")); mins = max(1, min(int(m.group(1)) if m else 2, 5))
+            pp_team = ids["home"] if tid == ids["away"] else ids["away"]
+            windows.append({"start": t, "end": t + mins * 60, "pp_team": pp_team, "minor": mins <= 2, "done": False})
+            pid = str(p.get("id") or f"{t:.0f}{tid}")
+            if pp_team == fav_id:
+                st["pp_opps"] += 1
+                events.append({"key": f"hkpp:{pid}", "kind": "powerplay", "side": fav_side, "icon": "🧊", "label": "POWER PLAY", "opt": "fav_alert_powerplay",
+                               "text": f"{abbr} power play ({mins} min) — {text}   ·   PP {st['pp_goals']}/{st['pp_opps']} this game"})
+            else:
+                st["pk_opps"] += 1
+                events.append({"key": f"hkpk:{pid}", "kind": "powerplay", "side": fav_side, "icon": "🚫", "label": "PENALTY KILL", "opt": "fav_alert_powerplay",
+                               "text": f"{abbr} shorthanded ({mins} min) — {text}   ·   PK so far: {st['pk_opps'] - 1 - st['pk_allowed']} of {st['pk_opps'] - 1} killed"})
+        elif p.get("scoringPlay") and tid:
+            for w in windows:
+                if not w["done"] and w["start"] <= t <= w["end"] and w["pp_team"] == tid:
+                    if tid == fav_id: st["pp_goals"] += 1
+                    else: st["pk_allowed"] += 1
+                    if w["minor"]: w["done"] = True
+                    break
+    active = None
+    for w in windows:
+        if not w["done"] and w["end"] > last:
+            active = ("pp" if w["pp_team"] == fav_id else "pk", int(w["end"] - last))
+    return events, st, active
+_PK_AWARD_RE = re.compile(r"penalty (?:awarded|conceded|kick)|awarded a penalty|\bconcedes? a penalty", re.I)
+_PK_SCORED_RE = re.compile(r"(?:converts?|scores?|scored|slots?|buries|bury|fires?)\s+(?:in\s+)?(?:the|a|his|her)?\s*penalty|penalty\s+(?:scored|goal)", re.I)
+_PK_MISS_RE = re.compile(r"misses?\s+(?:the|a)?\s*penalty|penalty\s+(?:missed|saved)|saves?\s+(?:the|a)?\s*penalty|(?:missed|saved)\s+penalty|hits?\s+the\s+(?:post|bar)\s+from\s+the\s+spot", re.I)
+_RED_CARD_RE = re.compile(r"\bred card\b|\bsent off\b|\bdismissed\b", re.I)
+def soccer_fav_events(data, game, fav_sides):
+    """Penalty kicks (awarded / scored / saved / missed) and red cards in a soccer game with a favorite. Returns (events, stats)."""
+    rows = [(r["text"], r["type"]) for r in extract_commentary(data)]
+    for ev in ((data.get("keyEvents") if isinstance(data, dict) else None) or []):
+        if isinstance(ev, dict):
+            rows.append((str(ev.get("text") or ""), str((ev.get("type") or {}).get("text") or "") if isinstance(ev.get("type"), dict) else ""))
+    names = {sd: str(game.get(f"{sd}_name") or "").lower() for sd in ("home", "away")}
+    st = {"pk_for": 0, "pk_for_scored": 0, "pk_for_missed": 0, "pk_against": 0, "pk_against_scored": 0, "pk_against_missed": 0, "red_cards": 0}
+    events = []; seen = set()
+    for text, typ in rows:
+        low = text.lower(); key = re.sub(r"[^a-z]", "", low)[:60]
+        if not low or key in seen:
+            continue
+        seen.add(key)
+        named = sorted((low.index(names[sd]), sd) for sd in ("home", "away") if names[sd] and names[sd] in low)
+        named_side = named[0][1] if named else None            # the team named first: the taker / the conceding side
+        award_to = re.search(r"(?:awarded to|penalty (?:for|to))\s+(.+)", low)
+        if award_to:                                           # "Penalty awarded to Liverpool after a handball by ... (Chelsea)"
+            for sd in ("home", "away"):
+                if names[sd] and award_to.group(1).startswith(names[sd]):
+                    named_side = sd; award_to = "direct"; break
+        short = clean_play_text(text, 150)
+        if _RED_CARD_RE.search(text) and "no red card" not in low:
+            st["red_cards"] += 1
+            events.append({"key": f"rc:{key}", "kind": "red_card", "side": named_side or fav_sides[0], "icon": "🟥", "label": "RED CARD", "opt": "fav_alert_red_card", "text": short})
+        elif _PK_SCORED_RE.search(text) and named_side:
+            st["pk_for_scored" if named_side in fav_sides else "pk_against_scored"] += 1
+        elif _PK_MISS_RE.search(text) and named_side:
+            mine = named_side in fav_sides
+            st["pk_for_missed" if mine else "pk_against_missed"] += 1
+            events.append({"key": f"pkm:{key}", "kind": "penalty_kick", "side": named_side, "icon": "🧤" if not mine else "😬", "label": "PENALTY SAVED / MISSED",
+                           "opt": "fav_alert_penalty_kick", "text": short})
+        elif _PK_AWARD_RE.search(text):
+            conceded = bool(re.search(r"conced", low)) and award_to != "direct"
+            beneficiary = (_other_side(named_side) if conceded else named_side) if named_side else None
+            if beneficiary is None:
+                continue
+            mine = beneficiary in fav_sides
+            st["pk_for" if mine else "pk_against"] += 1
+            abbr = game.get(f"{beneficiary}_abbr", "")
+            events.append({"key": f"pk:{key}", "kind": "penalty_kick", "side": beneficiary, "icon": "⚽", "label": "PENALTY KICK",
+                           "opt": "fav_alert_penalty_kick", "text": f"Penalty kick {'for' if mine else 'against'} {game.get(f'{fav_sides[0]}_abbr', '') if not mine else abbr} — {short}   ·   this match: {st['pk_for']} for, {st['pk_against']} against"})
+    return events, st
+def football_turnover_events(data, game):
+    out = []
+    for p in _all_plays_in_order(data):
+        ptype = str((p.get("type") or {}).get("text") or "").lower() if isinstance(p.get("type"), dict) else ""
+        text = str(p.get("text") or "")
+        if (("interception" in ptype or "fumble" in ptype or re.search(r"\bINTERCEPTED\b|\bFUMBLES\b", text)) and "no turnover" not in text.lower()
+                and "incomplete" not in ptype):
+            out.append({"key": f"to:{p.get('id') or text[:40]}", "kind": "turnover", "side": None, "icon": "🔄", "label": "TURNOVER", "opt": "fav_alert_turnover",
+                        "text": clean_play_text(text, 170)})
+    return out
+def red_zone_update(prev, game, fav_sides):
+    """Red-zone trips for a favorite on offense, from the live situation. Returns (events, state)."""
+    st = dict(prev or {"in": False, "trips": 0, "td": 0, "fg": 0, "stop": 0, "side": None, "score0": 0})
+    sit = game.get("situation") if isinstance(game.get("situation"), dict) else {}
+    poss = str(sit.get("possession") or ((sit.get("lastPlay") or {}).get("team") or {}).get("id") or "")
+    poss_side = next((sd for sd in ("home", "away") if poss and str(game.get(f"{sd}_team_id") or "") == poss), None)
+    in_rz = bool(sit.get("isRedZone")) and poss_side in fav_sides
+    events = []
+    if in_rz and not st["in"]:
+        st.update({"in": True, "trips": st["trips"] + 1, "side": poss_side, "score0": int(game.get(f"{poss_side}_score") or 0)})
+        dd = str(sit.get("downDistanceText") or sit.get("shortDownDistanceText") or "")
+        events.append({"key": f"rz:{game.get('id')}:{st['trips']}", "kind": "redzone", "side": poss_side, "icon": "🔴", "label": "RED ZONE", "opt": "fav_alert_redzone",
+                       "text": f"{game.get(f'{poss_side}_abbr', '')} in the red zone" + (f" — {dd}" if dd else "") +
+                               f"   ·   RZ so far: {st['trips'] - 1} trip{'s' if st['trips'] != 2 else ''} ({st['td']} TD, {st['fg']} FG, {st['stop']} stopped)"})
+    elif st["in"] and not in_rz:
+        gain = int(game.get(f"{st['side']}_score") or 0) - st["score0"]
+        st["td" if gain >= 6 else ("fg" if gain >= 3 else "stop")] += 1
+        st["in"] = False
+    return events, st
+def run_update(prev, game, fav_sides):
+    """Unanswered scoring runs for a favorite in basketball (poll to poll). Returns (events, state)."""
+    st = dict(prev or {})
+    h, a = int(game.get("home_score") or 0), int(game.get("away_score") or 0)
+    last = st.get("last"); events = []
+    if last is not None:
+        for sd in fav_sides:
+            mine, theirs = (h, a) if sd == "home" else (a, h); lm, lt = (last[0], last[1]) if sd == "home" else (last[1], last[0])
+            gain, opp = mine - lm, theirs - lt
+            run = st.get(f"run_{sd}", 0)
+            if opp > 0: run = max(0, gain) if gain > 0 and opp == 0 else 0
+            elif gain > 0: run += gain
+            if opp > 0: st[f"alerted_{sd}"] = 0
+            st[f"run_{sd}"] = run; st[f"best_{sd}"] = max(st.get(f"best_{sd}", 0), run)
+            for threshold in (10, 15, 20, 25):
+                if run >= threshold > st.get(f"alerted_{sd}", 0):
+                    st[f"alerted_{sd}"] = threshold
+                    events.append({"key": f"run:{game.get('id')}:{sd}:{threshold}:{h + a}", "kind": "run", "side": sd, "icon": "🔥", "label": f"{threshold}-0 RUN", "opt": "fav_alert_run",
+                                   "text": f"{game.get(f'{sd}_abbr', '')} on a {run}-0 run — {game.get('away_abbr', '')} {a} – {h} {game.get('home_abbr', '')}"})
+    st["last"] = (h, a)
+    return events, st
+def bases_loaded_events(game, fav_sides):
+    sit = game.get("situation") if isinstance(game.get("situation"), dict) else {}
+    if not (sit.get("onFirst") and sit.get("onSecond") and sit.get("onThird")):
+        return []
+    text = f"{game.get('status_desc', '')} {game.get('clock', '')}".lower()
+    batting = "away" if "top" in text else ("home" if "bot" in text else None)
+    if batting not in fav_sides:
+        return []
+    return [{"key": f"bl:{game.get('id')}:{game.get('period')}:{batting}", "kind": "bases_loaded", "side": batting, "icon": "🧢", "label": "BASES LOADED", "opt": "fav_alert_bases_loaded",
+             "text": f"{game.get(f'{batting}_abbr', '')} has the bases loaded — {sit.get('outs', 0)} out"}]
 def suppress_postgame_dump(prev, curr, evs, seen_score_events):
     """Some ESPN leagues only publish a game once it is over: the first look at it shows the final score, which arrives
     as a flood of goals all at the same moment. When a game goes to final having never been live (or never showing any
@@ -5464,6 +6489,63 @@ class ScreenFlasher:
 # =============================================================================
 # This section controls when popups appear, pause, and disappear.
 # It manages the popup system so notifications stay organized.
+OBS_OVERLAY = None
+def overlay_push(pil, tag=None):
+    ov = OBS_OVERLAY
+    if ov is not None:
+        try: ov.push(pil, tag)
+        except Exception: pass
+def overlay_update(tag, pil):
+    ov = OBS_OVERLAY
+    if ov is not None:
+        try: ov.update_card(tag, pil)
+        except Exception: pass
+class OBSOverlay(tk.Toplevel):
+    """A plain window that mirrors every notification, newest at the bottom, on a solid background color: add it in OBS as a
+    Window Capture and key the color out (Chroma Key), so notifications stream without a screen capture."""
+    def __init__(self, root):
+        super().__init__(root)
+        self.title("Sports Tracker OBS overlay  (capture this window in OBS)")
+        self._bg = str(opt("obs_overlay_bg") or "#00FF00"); self._closed = False; self._cards = []
+        self.configure(bg=self._bg)
+        self.geometry(f"{int(opt('obs_overlay_width'))}x{int(opt('obs_overlay_height'))}+80+80")
+        self._stack = tk.Frame(self, bg=self._bg); self._stack.pack(side="bottom", fill="x")
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self._tick()
+    def push(self, pil, tag=None):
+        photo = ImageTk.PhotoImage(pil)
+        lbl = tk.Label(self._stack, image=photo, bg=self._bg, bd=0); lbl.image = photo; lbl.pack(side="top", pady=4)
+        self._cards.append({"label": lbl, "photo": photo, "expire": time.time() + float(opt("obs_overlay_show_s")), "tag": tag})
+        while len(self._cards) > int(opt("obs_overlay_max")):
+            self._drop(self._cards[0])
+    def update_card(self, tag, pil):
+        for c in self._cards:
+            if tag is not None and c["tag"] == tag:
+                photo = ImageTk.PhotoImage(pil); c["label"].config(image=photo); c["label"].image = photo; c["photo"] = photo
+                c["expire"] = max(c["expire"], time.time() + 6.0)
+                return True
+        return False
+    def _drop(self, c):
+        try: c["label"].destroy()
+        except Exception: pass
+        if c in self._cards:
+            self._cards.remove(c)
+    def _tick(self):
+        if self._closed:
+            return
+        now = time.time()
+        for c in list(self._cards):
+            if now >= c["expire"]:
+                self._drop(c)
+        try: self.after(300, self._tick)
+        except Exception: pass
+    def close(self):
+        global OBS_OVERLAY
+        self._closed = True
+        if OBS_OVERLAY is self:
+            OBS_OVERLAY = None
+        try: self.destroy()
+        except Exception: pass
 class PopupManager:
     def __init__(self, root):
         self.root = root; self.active = []; self.flasher = None; self._live_count_cb = None
@@ -5545,6 +6627,10 @@ class PopupManager:
         lbl=tk.Label(win,image=tkim,bg="#010101",bd=0,cursor="hand2" if dismissable else ""); lbl.pack()
         lbl.image=tkim
         entry=[win,tkim,H,is_mine,tag,{"expire":0.0},lbl,offset,alloc,corner]
+        overlay_push(pil, tag)                      # the OBS overlay mirrors every notification
+        if not opt("popups_on_screen") and OBS_OVERLAY is not None:
+            try: win.withdraw()                     # overlay-only mode: the card is not drawn on the desktop
+            except Exception: pass
         # Clicking a popup dismisses it right away (otherwise it stays for its normal duration).
         def _dismiss(event=None, w=win, e=entry):
             try:
@@ -5646,6 +6732,7 @@ class PopupManager:
                             scoring_team=scoring_team,is_mine=entry[3])
             W,H=pil.size; tkim=ImageTk.PhotoImage(pil)
             lbl.config(image=tkim); lbl.image=tkim; entry[1]=tkim; entry[2]=H; entry[8]=max(entry[8],H)
+            overlay_update(tag, pil)
             x,y=self._place_xy(entry[9],entry[7],W,H)          # same spot, only its size changes
             win.geometry(f"{W}x{H}+{x}+{y}")
             if extend_ms:
@@ -5691,6 +6778,8 @@ class PollThread(threading.Thread):
         self._settle = {}
         self._final_checked = set()
         self._stuck_checked = {}
+        self._fav_state = {}
+        self._ev_states = {}; self._ev_done = set(); self._ev_next = 0.0
     def stop(self): self.running = False; self._stop.set()
     def _mine(self, sport, abbr):
         abbr_up = abbr.upper()
@@ -5805,6 +6894,8 @@ class PollThread(threading.Thread):
         self.pm.root.after(0, lambda g=snap, t=text, ic=icon, lb=label, sp=sport, dm=_popup_ms(is_mine), im=is_mine,
                            tm=team: self.pm.show(g, t, None, ic, lb, sp, display_ms=dm, scoring_team=tm, is_mine=im))
     def handle_score_reversal(self, game, side, amount, old_away, old_home, new_away, new_home):
+        if sport_kind(game.get("sport", "")) == "basketball" and not opt("alert_basketball_reversals"):
+            return                                       # basketball scoreboards fix a point or two all the time: not worth an alert
         # A score decrease is surfaced separately from scoring so VAR/flag corrections
         # are visible even for sports whose normal score alerts are filtered.
         sport = game["sport"]
@@ -5897,6 +6988,94 @@ class PollThread(threading.Thread):
             return
         self._raise_alert("close", game, *_label_pair("close"),
                           f"{game['away_abbr']} {game['away_score']} – {game['home_score']} {game['home_abbr']}  |  tight finish")
+    def _fav_watch(self, games):
+        """Special alerts for my favorite teams' live games: what matters in each sport, plus the stats behind it."""
+        if not opt("fav_alerts_enabled"):
+            return
+        now = time.time()
+        for g in games:
+            if g.get("game_state") != "live" or g.get("sport") in EXTERNAL_SPORTS or g.get("id") in WATCHING:
+                continue
+            sides = [sd for sd in ("home", "away") if self._mine(g["sport"], g.get(f"{sd}_abbr", ""))]
+            if not sides:
+                continue
+            kind = sport_kind(g["sport"]); st = self._fav_state.setdefault(g["id"], {"seen": set(), "init": False, "t": 0.0})
+            events = []
+            try:
+                if kind == "football":
+                    ev, st["rz"] = red_zone_update(st.get("rz"), g, sides); events += ev
+                elif kind == "basketball":
+                    ev, st["run"] = run_update(st.get("run"), g, sides); events += ev
+                elif kind == "baseball":
+                    events += bases_loaded_events(g, sides)
+                if kind in ("hockey", "soccer", "football") and now - st["t"] >= int(opt("fav_poll_s")):
+                    st["t"] = now
+                    data = fetch_play_summary(g["sport"], g["id"], max_age=10)
+                    if data:
+                        if kind == "hockey":
+                            plays = _all_plays_in_order(data)
+                            for sd in sides[:1]:
+                                ev, hs, active = hockey_special_teams(plays, g, sd); events += ev; st["hockey"] = hs; st["hockey_active"] = active
+                        elif kind == "soccer":
+                            ev, ss = soccer_fav_events(data, g, sides); events += ev; st["soccer"] = ss
+                        elif kind == "football":
+                            events += football_turnover_events(data, g)
+                    first_pass = not st["init"]; st["init"] = True
+                    if first_pass:                              # started mid-game: learn what already happened, do not announce all of it
+                        st["seen"].update(e["key"] for e in events if not e["key"].startswith(("rz:", "run:", "bl:")))
+            except Exception as exc:
+                _ext_warn("fav_watch", f"FAVORITE ALERTS [{g.get('sport', '').upper()}]: {type(exc).__name__}: {exc}")
+                continue
+            for e in events:
+                if e["key"] in st["seen"] or not opt(e["opt"]):
+                    st["seen"].add(e["key"]); continue
+                st["seen"].add(e["key"])
+                self._fav_alert(g, e)
+        for gid in [k for k in self._fav_state if k not in {x.get("id") for x in games}][:50]:
+            self._fav_state.pop(gid, None)
+    def _events_watch(self):
+        """Race weekends, tournaments, fights: 'starting in 15 minutes', 'started', 'finished' (no running score to follow)."""
+        now = time.time()
+        keys = [k for k in EVENT_SPORTS if opt(f"ev_{k}")]
+        if not keys or now < self._ev_next:
+            return
+        busy = False; nowdt = datetime.datetime.now(datetime.timezone.utc)
+        want = (bool(opt("ev_alert_soon")), bool(opt("ev_alert_start")), bool(opt("ev_alert_finish")))
+        for key in keys:
+            try:
+                sessions = fetch_event_sessions(key, max_age=20)
+                if key == "f1" and not sessions:
+                    sessions = f1_current_weekend()[1]            # ESPN has nothing: use the published schedule
+                alerts, self._ev_states = event_alerts(sessions, self._ev_states, self._ev_done, nowdt, int(opt("ev_soon_min")), want)
+            except Exception as exc:
+                _ext_warn(f"events_{key}", f"EVENTS [{key.upper()}]: {type(exc).__name__}: {exc}"); continue
+            for s_ in sessions:
+                if s_["state"] == "in" or (s_["state"] == "pre" and isinstance(s_.get("start"), datetime.datetime) and 0 <= (s_["start"] - nowdt).total_seconds() <= 1500):
+                    busy = True
+            for a in alerts:
+                self._ev_done.add(a["key"]); self._ev_done.add(a.get("sig", a["key"]))
+                if notifications_muted(False):
+                    continue
+                self._event_alert(a)
+        self._ev_next = now + (30 if busy else 300)
+    def _event_alert(self, a):
+        name, _path, short = EVENT_SPORTS[a["series"]]
+        card = {"id": a["key"], "sport": "nfl", "away_abbr": short, "home_abbr": "", "away_name": name, "home_name": "", "away_score": 0, "home_score": 0,
+                "away_logo": "", "home_logo": "", "away_record": "", "home_record": "", "clock": "", "period": 0, "live": False, "game_state": "upcoming",
+                "status_name": "", "status_desc": "", "situation": {}, "play_detail": a["text"]}
+        _log(f"EVENT [{a['series'].upper()}]: {a['icon']} {a['label']} — {a['text']}", "cyan")
+        send_phone_alert("start" if "FINISHED" not in a["label"] else "final", f"{a['icon']} {a['label']}", a["text"], True)
+        display_ms = _popup_ms(False)
+        self.pm.root.after(0, lambda: self.pm.show(card, a["text"], None, a["icon"], a["label"], "nfl", display_ms=display_ms, scoring_team=name, is_mine=False))
+    def _fav_alert(self, g, e):
+        if not alert_allowed("fav", g, True):
+            return
+        side = e.get("side") or next((sd for sd in ("home", "away") if self._mine(g["sport"], g.get(f"{sd}_abbr", ""))), "home")
+        snap = dict(g, play_detail=e["text"])
+        _log(f"FAVORITE [{g['sport'].upper()}]: {e['icon']} {e['label']} — {e['text']}", _sport_color(g["sport"]))
+        _notify("fav", snap, e["icon"], e["label"], e["text"], True)
+        display_ms = _popup_ms(True); team = g.get(f"{side}_name", "")
+        self.pm.root.after(0, lambda: self.pm.show(snap, e["text"], None, e["icon"], e["label"], g["sport"], display_ms=display_ms, scoring_team=team, is_mine=True))
     def _check_stuck(self, games):
         """A live game whose scoreboard has not changed for a few minutes may really be over (ESPN often stops updating). Ask ESPN's
         game summary; if it says the game is over, end it now and take the real final score from the summary."""
@@ -5989,7 +7168,10 @@ class PollThread(threading.Thread):
                 apply_forced_final(games)
                 apply_stale_live(games)
                 self._check_stuck(games)
+                self._fav_watch(games)
+                self._events_watch()
                 self._reconcile_games(games)
+                record_finish_times(games, self.tracker.prev)
                 with _CACHE_LOCK: _ALL_GAMES_CACHE = list(games)
                 state_order={"live":0,"upcoming":1,"final":2}
                 games.sort(key=lambda x: state_order.get(x.get("game_state","upcoming"),9))
@@ -6163,7 +7345,7 @@ class SportsDashboard(tk.Toplevel):
         self.root = root
         self.pm   = pm
         self._on_close = on_close or self.destroy
-        self.title("🏟  Sports Score Tracker  v22")
+        self.title("Sports Score Tracker  v24")
         self.configure(bg=GUI_BG)
         self.geometry(f"{int(opt('dash_width'))}x{int(opt('dash_height'))}")
         self.minsize(900,600)
@@ -6222,6 +7404,20 @@ class SportsDashboard(tk.Toplevel):
             self.pm.pending.clear(); self.pm.close_all()
         except Exception:
             pass
+    def toggle_obs_overlay(self):
+        """Open / close the OBS overlay window (a window OBS can capture: notifications only, on a keyable background)."""
+        global OBS_OVERLAY
+        if OBS_OVERLAY is not None:
+            OBS_OVERLAY.close(); return
+        OBS_OVERLAY = OBSOverlay(self.root)
+        try:
+            img = Image.new("RGBA", (640, 86), (13, 17, 23, 255)); d = ImageDraw.Draw(img)
+            d.rounded_rectangle([0, 0, 639, 85], radius=14, outline=(0, 230, 118, 255), width=3, fill=(13, 17, 23, 255))
+            d.text((24, 16), "OBS overlay is on", font=load_font("arialbd.ttf", 24), fill=(0, 230, 118, 255))
+            d.text((24, 50), "Add this window in OBS (Window Capture) and key out the background color.", font=load_font("arial.ttf", 15), fill=(200, 208, 216, 255))
+            OBS_OVERLAY.push(img, "obs-ready")
+        except Exception:
+            pass
     def _copy_current_tab(self):
         """Copies everything on the tab that is showing (Live, Upcoming, Final, Standings ...) as plain text."""
         try:
@@ -6244,25 +7440,28 @@ class SportsDashboard(tk.Toplevel):
         hdr.pack(fill="x")
         hdr_inner = tk.Frame(hdr, bg=GUI_PANEL, pady=10)
         hdr_inner.pack(fill="x", padx=16)
-        tk.Label(hdr_inner, text="🏟  SPORTS SCORE TRACKER", font=(UI_FONT, _fs(15),"bold"),
+        tk.Label(hdr_inner, text="SPORTS SCORE TRACKER", font=(UI_FONT, _fs(15),"bold"),
                  fg=GUI_GREEN, bg=GUI_PANEL).pack(side="left")
         self._live_badge = tk.Label(hdr_inner, text="  0 LIVE  ", font=(UI_FONT, _fs(9),"bold"),
                                      fg="#000", bg="#2D2D2D", padx=4, pady=2)
         self._live_badge.pack(side="left", padx=12)
-        tk.Button(hdr_inner, text="⚙ Settings", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL,
+        hdr_btns = tk.Frame(hdr, bg=GUI_PANEL); hdr_btns.pack(fill="x", padx=16, pady=(0, 8))      # the buttons get their own line
+        tk.Button(hdr_btns, text="⚙ Settings", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL,
                   relief="flat", cursor="hand2",
-                  command=lambda: show_settings_window(self.root)).pack(side="right", padx=4)
-        self._snooze_btn = tk.Menubutton(hdr_inner, text=snooze_label(), font=(UI_FONT, _fs(9)), fg=GUI_MUTED,
+                  command=lambda: show_settings_window(self.root)).pack(side="left", padx=(0, 8))
+        self._snooze_btn = tk.Menubutton(hdr_btns, text=snooze_label(), font=(UI_FONT, _fs(9)), fg=GUI_MUTED,
                                          bg=GUI_PANEL, relief="flat", cursor="hand2", activebackground=GUI_PANEL)
         _build_snooze_menu(self._snooze_btn, on_change=lambda: self._snooze_btn.config(text=snooze_label()))
-        self._snooze_btn.pack(side="right", padx=4)
-        tk.Button(hdr_inner, text="📋 Copy page", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL, relief="flat", cursor="hand2",
-                  command=self._copy_current_tab).pack(side="right", padx=4)
-        self._spoiler_btn = tk.Button(hdr_inner, text=self._spoiler_text(), font=(UI_FONT, _fs(9)), fg=GUI_MUTED,
+        self._snooze_btn.pack(side="left", padx=(0, 8))
+        tk.Button(hdr_btns, text="📋 Copy page", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL, relief="flat", cursor="hand2",
+                  command=self._copy_current_tab).pack(side="left", padx=(0, 8))
+        tk.Button(hdr_btns, text="📺 OBS overlay", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL, relief="flat", cursor="hand2",
+                  command=self.toggle_obs_overlay).pack(side="left", padx=(0, 8))
+        self._spoiler_btn = tk.Button(hdr_btns, text=self._spoiler_text(), font=(UI_FONT, _fs(9)), fg=GUI_MUTED,
                                       bg=GUI_PANEL, relief="flat", cursor="hand2", command=self._toggle_spoiler)
-        self._spoiler_btn.pack(side="right", padx=4)
-        tk.Button(hdr_inner, text="⟳ Refresh", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL,
-                  relief="flat", cursor="hand2", command=self._manual_refresh).pack(side="right", padx=4)
+        self._spoiler_btn.pack(side="left", padx=(0, 8))
+        tk.Button(hdr_btns, text="⟳ Refresh", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL,
+                  relief="flat", cursor="hand2", command=self._manual_refresh).pack(side="left", padx=(0, 8))
         self._last_update_lbl = tk.Label(hdr_inner, text="", font=(UI_FONT, _fs(8)),
                                           fg=GUI_MUTED, bg=GUI_PANEL)
         self._last_update_lbl.pack(side="right", padx=8)
@@ -6271,7 +7470,7 @@ class SportsDashboard(tk.Toplevel):
         style.theme_use("default")
         style.configure("ST.TNotebook", background=GUI_BG, borderwidth=0, tabmargins=[0,0,0,0])
         style.configure("ST.TNotebook.Tab", background=GUI_PANEL, foreground=GUI_MUTED,
-                         padding=[18,8], font=(UI_FONT, _fs(10)), borderwidth=0)
+                         padding=[10,8], font=(UI_FONT, _fs(10)), borderwidth=0)
         style.map("ST.TNotebook.Tab",
                   background=[("selected",GUI_BG)],
                   foreground=[("selected",GUI_TEXT)])
@@ -6284,15 +7483,26 @@ class SportsDashboard(tk.Toplevel):
         self._tab_schedule = self._make_tab(nb, "  📅 Schedule  ")
         self._tab_standings = self._make_tab(nb, "  🏆 Standings  ") if opt("standings_enabled") else None
         self._tab_season    = self._make_tab(nb, "  🗓 Season  ")
+        self._tab_leaders   = self._make_tab(nb, "  📊 Leaders  ")
+        self._tab_events    = self._make_tab(nb, "  🏁 Events  ")
+        self._tab_teams     = self._make_tab(nb, "  🔍 Teams  ")
         self._tab_history   = self._make_tab(nb, "  🔔 History  ") if opt("history_enabled") else None
         self._tab_log      = self._make_tab(nb, "  📋 Log  ")
         self._build_schedule_tab()
         if self._tab_standings is not None: self._build_standings_tab(style)
         self._build_season_tab(style)
+        self._build_leaders_tab(style)
+        self._build_events_tab(style)
+        self._build_teams_tab(style)
         if self._tab_history is not None: self._build_history_tab()
         self._build_log_tab()
+        for _tab in (self._tab_standings, self._tab_season, self._tab_leaders, self._tab_events):
+            if _tab is not None:
+                _kids = _tab.pack_slaves()
+                if _kids:
+                    split_toolbar(_kids[0])
         self._tabs_by_name = {"live": self._tab_live, "upcoming": self._tab_upcoming, "final": self._tab_final,
-                              "schedule": self._tab_schedule, "standings": self._tab_standings, "season": self._tab_season,
+                              "schedule": self._tab_schedule, "standings": self._tab_standings, "season": self._tab_season, "leaders": self._tab_leaders, "events": self._tab_events, "teams": self._tab_teams,
                               "history": self._tab_history, "log": self._tab_log}
         self.select_tab(str(opt("dash_default_tab")))
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -6349,8 +7559,8 @@ class SportsDashboard(tk.Toplevel):
         row1 = tk.Frame(body, bg=bg_card)
         row1.pack(fill="x")
         hide = self._scores_hidden(game)
-        a_sc = "•" if hide else game.get("away_score", 0)
-        h_sc = "•" if hide else game.get("home_score", 0)
+        a_sc = "•" if hide else score_cell(game, "away")
+        h_sc = "•" if hide else score_cell(game, "home")
         pin_lbl = reveal_lbl = None
         if opt("mini_enabled"):
             pin_lbl = tk.Label(row1, text="📌", font=(UI_FONT, _fs(10)), fg=GUI_MUTED, bg=bg_card, cursor="hand2")
@@ -6656,7 +7866,7 @@ class SportsDashboard(tk.Toplevel):
         recent_dates = {datetime.date.today() - datetime.timedelta(days=d)
                         for d in range(0, int(opt("final_days_back")) + 1)}
         final_games = [g for g in self._final_games if g.get("game_state") == "final" and _game_local_date(g) in recent_dates]
-        final_games.sort(key=lambda g: self._order_key(g, newest_first=True))
+        final_games.sort(key=lambda g: (-finish_time(g), str(g.get("id"))))      # the game that ended last first (favorites still go on top)
         my_games = [g for g in final_games if self._is_mine_game(g)]
         other_games = [g for g in final_games if g not in my_games]
         entries = []
@@ -6930,7 +8140,7 @@ class SportsDashboard(tk.Toplevel):
         except Exception:
             pass
         self._player_windows[key] = PlayerWindow(self, sport, athlete, team_name)
-    def show_team_page(self, sport, row, standing_text=""):
+    def show_team_page(self, sport, row, standing_text="", season=None):
         key = (sport, str(row.get("id") or row.get("abbr")))
         win = self._team_pages.get(key)
         try:
@@ -6938,7 +8148,7 @@ class SportsDashboard(tk.Toplevel):
                 _raise_window(win); return
         except Exception:
             pass
-        self._team_pages[key] = TeamPage(self, sport, row, standing_text)
+        self._team_pages[key] = TeamPage(self, sport, row, standing_text, season)
     def show_game_detail(self, game):
         gid = game.get("id")
         win = self._detail_windows.get(gid)
@@ -6970,6 +8180,9 @@ class SportsDashboard(tk.Toplevel):
         if first: self._st_combo.set(_ALL_SPORTS_GUI.get(first, first))
         self._st_combo.pack(side="left", padx=12)
         self._st_combo.bind("<<ComboboxSelected>>", lambda e: self._load_standings())
+        self._st_season = ttk.Combobox(top, values=[], state="readonly", font=(UI_FONT, _fs(10)), width=9)
+        self._st_season.pack(side="left", padx=(0, 12)); self._st_season_sport = None; self._st_season_map = {}
+        self._st_season.bind("<<ComboboxSelected>>", lambda e: self._load_standings(force=True))
         self._st_view_combo = ttk.Combobox(top, values=["Standings"], state="readonly", font=(UI_FONT, _fs(10)), width=12)
         self._st_view_combo.bind("<<ComboboxSelected>>", lambda e: self._on_view_change())
         tk.Button(top, text="⟳ Refresh", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL, relief="flat",
@@ -7007,6 +8220,374 @@ class SportsDashboard(tk.Toplevel):
         hs.config(command=self._br_canvas.xview); vs.config(command=self._br_canvas.yview)
         hs.pack(side="bottom", fill="x"); vs.pack(side="right", fill="y"); self._br_canvas.pack(side="left", fill="both", expand=True)
         frame.pack(fill="both", expand=True, padx=8, pady=8)
+    # ---- find any team in any tracked league: open its stats page, or track it ----
+    def _build_teams_tab(self, style):
+        style.configure("TM.Treeview", background="#0A0E14", fieldbackground="#0A0E14", foreground=GUI_TEXT,
+                        rowheight=int(26 * float(opt("ui_font_scale"))), borderwidth=0, font=(UI_FONT, _fs(10)))
+        style.configure("TM.Treeview.Heading", background=GUI_PANEL, foreground=GUI_MUTED, font=(UI_FONT, _fs(9), "bold"), relief="flat")
+        style.map("TM.Treeview", background=[("selected", "#1F2937")])
+        self._tm_rows = {}
+        top = tk.Frame(self._tab_teams, bg=GUI_BG, pady=8); top.pack(fill="x", padx=12)
+        tk.Label(top, text="🔍 Find a team", font=(UI_FONT, _fs(11), "bold"), fg=GUI_TEXT, bg=GUI_BG).pack(side="left")
+        self._tm_var = tk.StringVar()
+        self._tm_entry = tk.Entry(top, textvariable=self._tm_var, font=(UI_FONT, _fs(11)), bg=GUI_PANEL, fg="#FFF", insertbackground="white", relief="flat", width=34)
+        self._tm_entry.pack(side="left", padx=10, ipady=4)
+        self._tm_var.trace_add("write", lambda *_: self.after(150, self._refresh_team_results))
+        bar = tk.Frame(self._tab_teams, bg=GUI_BG); bar.pack(fill="x", padx=12, pady=(0, 6))
+        for text, cmd in (("📊  Open team page (stats, players, schedule)", self._open_team_row), ("⭐  Track this team in every league", self._track_team_row)):
+            tk.Button(bar, text=text, command=cmd, font=(UI_FONT, _fs(9)), fg=GUI_TEXT, bg=GUI_PANEL, relief="flat", cursor="hand2", padx=8, pady=3).pack(side="left", padx=(0, 8))
+        self._tm_status = tk.Label(bar, text="", font=(UI_FONT, _fs(8)), fg=GUI_MUTED, bg=GUI_BG); self._tm_status.pack(side="right")
+        tk.Frame(self._tab_teams, bg=GUI_BORDER, height=1).pack(fill="x")
+        frame = tk.Frame(self._tab_teams, bg=GUI_BG); frame.pack(fill="both", expand=True, padx=8, pady=8)
+        self._tm_tree = ttk.Treeview(frame, style="TM.Treeview", columns=("team", "league", "fav"), show="headings")
+        for c, t, w, a in (("team", "Team", 300, "w"), ("league", "Competition", 300, "w"), ("fav", "Tracked", 80, "center")):
+            self._tm_tree.heading(c, text=t); self._tm_tree.column(c, width=w, anchor=a, stretch=(c != "fav"))
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self._tm_tree.yview); self._tm_tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); self._tm_tree.pack(side="left", fill="both", expand=True)
+        self._tm_tree.tag_configure("mine", foreground=GUI_YELLOW)
+        self._tm_tree.bind("<Double-Button-1>", lambda e: self._open_team_row())
+    def _open_teams(self):
+        load_team_index(); build_team_index_async()
+        try: self._tm_entry.focus_set()
+        except Exception: pass
+        self._refresh_team_results()
+    def _refresh_team_results(self):
+        tree = self._tm_tree
+        tree.delete(*tree.get_children()); self._tm_rows = {}
+        groups = search_teams(self._tm_var.get(), 40)
+        mine = {(sp, a) for sp, a in MY_TEAMS}
+        for g in groups:
+            for sport, abbr, tid in g["leagues"]:
+                fav = (sport, abbr.upper()) in mine
+                iid = tree.insert("", "end", values=(g["name"], _ALL_SPORTS_SETTINGS.get(sport, sport), "★" if fav else ""), tags=(("mine",) if fav else ()))
+                self._tm_rows[iid] = (g, sport, abbr, tid)
+        st_ = TEAM_INDEX_STATE
+        if st_["running"]:
+            self._tm_status.config(text=f"Learning every team… {st_['done']}/{st_['total']}")
+            self.after(2000, self._refresh_team_results) if self.nb.select() == str(self._tab_teams) else None
+        elif not _TEAM_INDEX:
+            self._tm_status.config(text="Team list is loading in the background…")
+        else:
+            self._tm_status.config(text=(f"{len(self._tm_rows)} results" if groups else ("Type a team name" if len(self._tm_var.get().strip()) < 2 else "No team found in your tracked leagues")))
+    def _selected_team_row(self):
+        sel = self._tm_tree.selection()
+        return self._tm_rows.get(sel[0]) if sel else None
+    def _open_team_row(self):
+        r = self._selected_team_row()
+        if not r:
+            self._tm_status.config(text="Click a team first"); return
+        g, sport, abbr, tid = r
+        self.show_team_page(sport, {"id": tid, "abbr": abbr, "name": g["name"], "logo": "", "stats": {}}, "")
+    def _track_team_row(self):
+        global MY_TEAMS
+        r = self._selected_team_row()
+        if not r:
+            self._tm_status.config(text="Click a team first"); return
+        g = r[0]; added = add_team_group(g)
+        save_config(); MY_TEAMS = _build_my_teams()
+        self._tm_status.config(text=f"Tracking {g['name']} in {len(g['leagues'])} competition(s)")
+        self._refresh_team_results()
+    # ---- races, tournaments, fights: any season / month; click a Formula 1 race for its history page ----
+    def _build_events_tab(self, style):
+        style.configure("EV.Treeview", background="#0A0E14", fieldbackground="#0A0E14", foreground=GUI_TEXT,
+                        rowheight=int(24 * float(opt("ui_font_scale"))), borderwidth=0, font=(UI_FONT, _fs(10)))
+        style.configure("EV.Treeview.Heading", background=GUI_PANEL, foreground=GUI_MUTED, font=(UI_FONT, _fs(9), "bold"), relief="flat")
+        style.map("EV.Treeview", background=[("selected", "#1F2937")])
+        self._ev_loading = False; self._ev_rows = {}; self._ev_month = None; self._ev_names = {}
+        top = tk.Frame(self._tab_events, bg=GUI_BG, pady=6); top.pack(fill="x", padx=12)
+        tk.Label(top, text="🏁 Races, tournaments & fights", font=(UI_FONT, _fs(11), "bold"), fg=GUI_TEXT, bg=GUI_BG).pack(side="left")
+        self._ev_series = ttk.Combobox(top, values=[], state="readonly", font=(UI_FONT, _fs(9)), width=16); self._ev_series.pack(side="left", padx=(10, 0))
+        self._ev_series.bind("<<ComboboxSelected>>", lambda e: self._events_series_changed())
+        self._ev_season = ttk.Combobox(top, values=[], state="readonly", font=(UI_FONT, _fs(9)), width=7); self._ev_season.pack(side="left", padx=(8, 0))
+        self._ev_season.bind("<<ComboboxSelected>>", lambda e: self._load_events(force=True))
+        self._ev_month_lbl = tk.Label(top, text="", font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_BG)
+        self._ev_prev = tk.Button(top, text="◀", command=lambda: self._events_month(-1), font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL, relief="flat", cursor="hand2", width=3)
+        self._ev_next = tk.Button(top, text="▶", command=lambda: self._events_month(1), font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL, relief="flat", cursor="hand2", width=3)
+        for text, cmd in (("📋 Copy", lambda: copy_to_clipboard(self, tree_text(self._ev_tree, False))), ("⟳ Refresh", lambda: self._load_events(force=True))):
+            tk.Button(top, text=text, command=cmd, font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL, relief="flat", cursor="hand2").pack(side="right", padx=3)
+        self._ev_status = tk.Label(top, text="", font=(UI_FONT, _fs(8)), fg=GUI_MUTED, bg=GUI_BG); self._ev_status.pack(side="right", padx=8)
+        tk.Frame(self._tab_events, bg=GUI_BORDER, height=1).pack(fill="x")
+        frame = tk.Frame(self._tab_events, bg=GUI_BG); frame.pack(fill="both", expand=True, padx=8, pady=8)
+        cols = ("series", "event", "session", "when", "status", "result")
+        self._ev_tree = ttk.Treeview(frame, style="EV.Treeview", columns=cols, show="headings")
+        for c, t, w in (("series", "Series", 90), ("event", "Event", 230), ("session", "Session / circuit", 190), ("when", "When", 170), ("status", "Status", 100), ("result", "Winner / top finishers", 300)):
+            self._ev_tree.heading(c, text=t); self._ev_tree.column(c, width=w, anchor="w", stretch=(c in ("event", "result")))
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self._ev_tree.yview); self._ev_tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); self._ev_tree.pack(side="left", fill="both", expand=True)
+        self._ev_tree.tag_configure("live", foreground=GUI_GREEN, font=(UI_FONT, _fs(10), "bold"))
+        self._ev_tree.tag_configure("post", foreground=GUI_MUTED)
+        self._ev_tree.tag_configure("head", foreground=GUI_BLUE, font=(UI_FONT, _fs(10), "bold"))
+        self._ev_tree.bind("<Double-Button-1>", self._on_events_click)
+        self._ev_tree.bind("<ButtonRelease-1>", self._on_events_click)
+    def _events_key(self):
+        return self._ev_names.get(self._ev_series.get())
+    def _refresh_event_series(self):
+        keys = [k for k in EVENT_SPORTS if opt(f"ev_{k}")]
+        self._ev_names = {EVENT_SPORTS[k][0]: k for k in keys}
+        try:
+            self._ev_series["values"] = list(self._ev_names)
+            if self._ev_series.get() not in self._ev_names and self._ev_names:
+                self._ev_series.set(next(iter(self._ev_names)))
+        except Exception:
+            pass
+    def _events_series_changed(self):
+        self._ev_month = None; self._sync_event_controls(); self._load_events(force=True)
+    def _sync_event_controls(self):
+        key = self._events_key()
+        for w in (self._ev_season, self._ev_prev, self._ev_next, self._ev_month_lbl):
+            try: w.pack_forget()
+            except Exception: pass
+        if key == "f1":
+            opts = season_options("f1", 40)
+            self._ev_season["values"] = [l for l, _p in opts]
+            if self._ev_season.get() not in [l for l, _p in opts]:
+                self._ev_season.set(opts[0][0])
+            self._ev_season.pack(side="left", padx=(8, 0))
+        elif key:
+            self._ev_prev.pack(side="left", padx=(8, 2)); self._ev_month_lbl.pack(side="left", padx=2); self._ev_next.pack(side="left", padx=2)
+            self._ev_month_lbl.config(text=self._month_text())
+    def _month_text(self):
+        m = self._ev_month or datetime.date.today().strftime("%Y%m")
+        return datetime.date(int(m[:4]), int(m[4:6]), 1).strftime("%B %Y")
+    def _events_month(self, delta):
+        m = self._ev_month or datetime.date.today().strftime("%Y%m")
+        y, mo = int(m[:4]), int(m[4:6]) + delta
+        y += (mo - 1) // 12; mo = (mo - 1) % 12 + 1
+        self._ev_month = f"{y}{mo:02d}"
+        self._ev_month_lbl.config(text=self._month_text()); self._load_events(force=True)
+    def _load_events(self, force=False):
+        self._refresh_event_series()
+        key = self._events_key()
+        if self._ev_loading:
+            return
+        if not key:
+            self._render_events([]); self._ev_status.config(text="Turn a series on in Customize → Racing & Events"); return
+        self._sync_event_controls()
+        self._ev_loading = True; self._ev_status.config(text="Loading...")
+        season_label_ = self._ev_season.get() if key == "f1" else ""; month = self._ev_month
+        def _do():
+            try:
+                if key == "f1":
+                    opts = season_options("f1", 40); cur = opts[0][0]
+                    season = None if (not season_label_ or season_label_ == cur) else dict(opts).get(season_label_)
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        f_cal = pool.submit(fetch_f1_calendar, season); f_wk = pool.submit(f1_current_weekend)
+                        cal = f_cal.result(); wk = f_wk.result() if season is None else (None, [])
+                    data = ("f1", (cal, wk))
+                else:
+                    data = ("sessions", fetch_event_sessions(key, max_age=0 if force else 60, dates=month))
+            except Exception:
+                data = ("sessions", [])
+            try: self.after(0, lambda: self._finish_events(data))
+            except Exception: self._ev_loading = False
+        threading.Thread(target=_do, daemon=True).start()
+    def _finish_events(self, data):
+        self._ev_loading = False
+        kind, rows = data
+        if kind == "f1":
+            self._render_f1_calendar(rows[0], rows[1]); rows = rows[0]
+        else:
+            self._render_events(rows)
+        self._ev_status.config(text=f"{len(rows)} {'races' if kind == 'f1' else 'sessions'}  ·  updated {time.strftime('%H:%M:%S')}")
+    def _render_f1_calendar(self, races, weekend=None):
+        tree = self._ev_tree
+        tree.delete(*tree.get_children()); self._ev_rows = {}
+        wrace, wsessions = weekend if weekend else (None, [])
+        if wsessions:
+            iid = tree.insert("", "end", values=("", f"THIS WEEKEND / NEXT RACE  —  {wsessions[0]['event']}", "", "", "", ""), tags=("head",))
+            for x in sorted(wsessions, key=lambda z: z["start"] or datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)):
+                when = (x["start"].astimezone().strftime("%a %b %d  ") + _fmt_clock_time(x["start"])) if isinstance(x.get("start"), datetime.datetime) else ""
+                status = {"in": "LIVE", "pre": "Upcoming", "post": "Finished"}[x["state"]]
+                iid = tree.insert("", "end", values=("F1", x["event"], x["label"], when, status, "   ".join(f"{i + 1}. {n}" for i, n in enumerate(x["podium"]))),
+                                  tags=("live",) if x["state"] == "in" else (("post",) if x["state"] == "post" else ()))
+                if wrace:
+                    self._ev_rows[iid] = wrace
+            tree.insert("", "end", values=("", "", "", "", "", ""))
+            tree.insert("", "end", values=("", "SEASON CALENDAR  (click a race for its history)", "", "", "", ""), tags=("head",))
+        today = datetime.date.today().isoformat(); nxt = next((r["round"] for r in races if not r["winner"] and r["date"] >= today), None)
+        for r in races:
+            status = "Finished" if r["winner"] else ("NEXT RACE" if r["round"] == nxt else "Upcoming")
+            iid = tree.insert("", "end", values=(f"Round {r['round']}", r["name"], f"{r['circuit']}, {r['locality']}", _f1_when(r["date"], r["time"]), status, r["winner"]),
+                              tags=("live",) if status == "NEXT RACE" else (("post",) if r["winner"] else ()))
+            self._ev_rows[iid] = r
+        if not races:
+            tree.insert("", "end", values=("", "No races found (is the internet on?)", "", "", "", ""))
+    def _render_events(self, sessions):
+        tree = self._ev_tree
+        tree.delete(*tree.get_children()); self._ev_rows = {}
+        far = datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
+        live = [x for x in sessions if x["state"] == "in"]
+        upcoming = sorted([x for x in sessions if x["state"] == "pre"], key=lambda x: x["start"] or far)
+        done = sorted([x for x in sessions if x["state"] == "post"], key=lambda x: x["start"] or far, reverse=True)
+        for x in live + upcoming + done[:60]:
+            when = (x["start"].astimezone().strftime("%a %b %d  ") + _fmt_clock_time(x["start"])) if isinstance(x.get("start"), datetime.datetime) else ""
+            status = {"in": "LIVE", "pre": "Upcoming", "post": "Finished"}[x["state"]]
+            tree.insert("", "end", values=(EVENT_SPORTS[x["series"]][0], x["event"], x["label"], when, status, "   ".join(f"{i + 1}. {n}" for i, n in enumerate(x["podium"]))),
+                        tags=("live",) if x["state"] == "in" else (("post",) if x["state"] == "post" else ()))
+    def _on_events_click(self, event):
+        try: iid = self._ev_tree.identify_row(event.y)
+        except Exception: return
+        race = self._ev_rows.get(iid)
+        if race and (getattr(event, "type", "") in ("4", "ButtonRelease", 4) or True):
+            self.show_f1_event(race)
+    def show_f1_entity(self, kind, ent_id, name):
+        wins = getattr(self, "_f1_windows", None)
+        if wins is None:
+            wins = self._f1_windows = {}
+        key = (kind, ent_id)
+        w = wins.get(key)
+        if w is not None:
+            try: w.deiconify(); w.lift(); return
+            except Exception: wins.pop(key, None)
+        wins[key] = F1EntityWindow(self, kind, ent_id, name)
+    def show_f1_event(self, race):
+        wins = getattr(self, "_f1_windows", None)
+        if wins is None:
+            wins = self._f1_windows = {}
+        key = (race.get("season"), race.get("round"))
+        w = wins.get(key)
+        if w is not None:
+            try: w.deiconify(); w.lift(); return
+            except Exception: wins.pop(key, None)
+        wins[key] = F1EventWindow(self, race)
+    # ---- player leaders: who has the most passing yards / points / goals / home runs ... (any season) ----
+    def _build_leaders_tab(self, style):
+        style.configure("LD.Treeview", background="#0A0E14", fieldbackground="#0A0E14", foreground=GUI_TEXT,
+                        rowheight=int(24 * float(opt("ui_font_scale"))), borderwidth=0, font=(UI_FONT, _fs(10)))
+        style.configure("LD.Treeview.Heading", background=GUI_PANEL, foreground=GUI_MUTED, font=(UI_FONT, _fs(9), "bold"), relief="flat")
+        style.map("LD.Treeview", background=[("selected", "#1F2937")])
+        self._ld = {"page": 1, "loading": False, "opened": False}; self._ld_names = {}; self._ld_seasons = {}; self._ld_catmap = {}; self._ld_statmap = {}; self._ld_rows = {}
+        top = tk.Frame(self._tab_leaders, bg=GUI_BG, pady=6); top.pack(fill="x", padx=12)
+        tk.Label(top, text="📊 Player Leaders", font=(UI_FONT, _fs(11), "bold"), fg=GUI_TEXT, bg=GUI_BG).pack(side="left")
+        def combo(width):
+            c = ttk.Combobox(top, values=[], state="readonly", font=(UI_FONT, _fs(9)), width=width); c.pack(side="left", padx=(8, 0)); return c
+        self._ld_league = combo(24); self._ld_season = combo(9); self._ld_cat = combo(14); self._ld_stat = combo(20)
+        self._ld_league.bind("<<ComboboxSelected>>", lambda e: self._leaders_league_changed())
+        self._ld_season.bind("<<ComboboxSelected>>", lambda e: self._load_leaders(reset=True))
+        self._ld_cat.bind("<<ComboboxSelected>>", lambda e: self._leaders_cat_changed())
+        self._ld_stat.bind("<<ComboboxSelected>>", lambda e: self._load_leaders(reset=True))
+        for text, cmd in (("📋 Copy", lambda: copy_to_clipboard(self, tree_text(self._ld_tree, False))), ("⬇ 50 more", lambda: self._load_leaders(more=True)),
+                          ("⟳ Refresh", lambda: self._load_leaders(reset=True))):
+            tk.Button(top, text=text, command=cmd, font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL, relief="flat", cursor="hand2").pack(side="right", padx=3)
+        self._ld_status = tk.Label(top, text="", font=(UI_FONT, _fs(8)), fg=GUI_MUTED, bg=GUI_BG); self._ld_status.pack(side="right", padx=8)
+        tk.Frame(self._tab_leaders, bg=GUI_BORDER, height=1).pack(fill="x")
+        frame = tk.Frame(self._tab_leaders, bg=GUI_BG); frame.pack(fill="both", expand=True, padx=8, pady=8)
+        self._ld_tree = ttk.Treeview(frame, style="LD.Treeview", columns=("rank", "name", "team", "pos"), show="headings")
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self._ld_tree.yview); self._ld_tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); self._ld_tree.pack(side="left", fill="both", expand=True)
+        self._ld_tree.tag_configure("mine", foreground=GUI_YELLOW, font=(UI_FONT, _fs(10), "bold"))
+        self._ld_tree.bind("<ButtonRelease-1>", self._on_leaders_click)
+    def _refresh_leaders_leagues(self):
+        """Only the leagues you track that have player stats (favorites' leagues first)."""
+        disabled = set(_CONFIG.get("disabled_sports", [])); mine = {sp for sp, _a in MY_TEAMS}
+        have_key = bool(str(opt("apifootball_key") or "").strip())
+        keys = [sp for sp in list(SPORT_PATH) if sp not in disabled and sp not in EXTERNAL_SPORTS and sport_kind(sp) in ("football", "basketball", "baseball", "hockey", "soccer")]
+        keys.sort(key=lambda sp: (0 if sp in mine else 1, _sport_rank(sp)))
+        names = {}
+        for sp in keys:
+            label = _ALL_SPORTS_SETTINGS.get(sp, sp)
+            names[label if label not in names else f"{label} ({sp})"] = sp
+        self._ld_names = names
+        try:
+            self._ld_league["values"] = list(names)
+            if self._ld_league.get() not in names and names:
+                self._ld_league.set(next(iter(names)))
+        except Exception:
+            pass
+    def _open_leaders(self):
+        self._refresh_leaders_leagues()
+        if not self._ld["opened"] and self._ld_names:
+            self._ld["opened"] = True
+            self._leaders_league_changed()
+    def _leaders_sport(self):
+        return self._ld_names.get(self._ld_league.get())
+    def _leaders_league_changed(self):
+        sport = self._leaders_sport()
+        if not sport:
+            return
+        opts = season_options(sport); self._ld_seasons = dict(opts)
+        try:
+            self._ld_season["values"] = [l for l, _p in opts]; self._ld_season.set(opts[0][0])
+            self._ld_cat.set(""); self._ld_stat.set("")
+        except Exception:
+            pass
+        self._load_leaders(reset=True)
+    def _leaders_cat_changed(self):
+        try: self._ld_stat.set("")
+        except Exception: pass
+        self._load_leaders(reset=True)
+    def _leaders_season_param(self, sport):
+        opts = season_options(sport)
+        label = self._ld_season.get()
+        return None if (not label or label == opts[0][0]) else dict(opts).get(label)
+    def _load_leaders(self, reset=False, more=False):
+        sport = self._leaders_sport()
+        if not sport or self._ld["loading"]:
+            return
+        self._ld["page"] = (self._ld["page"] + 1) if more else 1
+        page = self._ld["page"]; season = self._leaders_season_param(sport)
+        cat = self._ld_catmap.get(self._ld_cat.get()); stat = self._ld_statmap.get(self._ld_stat.get())
+        what = dict(SOCCER_LEADER_KINDS).get(self._ld_cat.get(), "topscorers")
+        self._ld["loading"] = True; self._ld_status.config(text="Loading...")
+        def _do():
+            try:
+                if sport_kind(sport) == "soccer" and str(opt("apifootball_key") or "").strip():
+                    rows, msg = fetch_soccer_leaders(sport, season, what)
+                    result = {"categories": [], "rows": rows, "msg": msg, "soccer": True, "category": None}
+                else:
+                    result = fetch_leaders(sport, season, cat, stat, 50, page)
+            except Exception as exc:
+                result = {"categories": [], "rows": [], "msg": f"Could not load leaders ({type(exc).__name__})", "category": None}
+            try: self.after(0, lambda: self._finish_leaders(sport, result, more))
+            except Exception: self._ld["loading"] = False
+        threading.Thread(target=_do, daemon=True).start()
+    def _finish_leaders(self, sport, result, more):
+        self._ld["loading"] = False
+        if sport != self._leaders_sport():
+            return
+        tree = self._ld_tree
+        soccer = bool(result.get("soccer"))
+        if soccer:
+            labels = SOCCER_LEADER_LABELS
+            try:
+                self._ld_cat["values"] = [l for l, _k in SOCCER_LEADER_KINDS]
+                if not self._ld_cat.get(): self._ld_cat.set(SOCCER_LEADER_KINDS[0][0])
+                self._ld_stat["values"] = []
+            except Exception:
+                pass
+        else:
+            cats = result.get("categories") or []
+            self._ld_catmap = {c["display"]: c["name"] for c in cats}
+            chosen = next((c for c in cats if c["name"] == result.get("category")), cats[0] if cats else None)
+            labels = chosen["labels"] if chosen else []
+            try:
+                self._ld_cat["values"] = list(self._ld_catmap)
+                if chosen: self._ld_cat.set(chosen["display"])
+                self._ld_statmap = dict(zip(chosen["displays"], chosen["names"])) if chosen else {}
+                self._ld_stat["values"] = list(self._ld_statmap)
+            except Exception:
+                pass
+        tree["columns"] = ["rank", "name", "team", "pos"] + [f"c{i}" for i in range(len(labels))]
+        for col, text, w, anc in (("rank", "#", 46, "center"), ("name", "Player", 210, "w"), ("team", "Team", 70, "center"), ("pos", "Pos", 56, "center")):
+            tree.heading(col, text=text); tree.column(col, width=w, anchor=anc, stretch=False)
+        for i, lab in enumerate(labels):
+            tree.heading(f"c{i}", text=lab); tree.column(f"c{i}", width=max(52, 11 * len(lab) + 14), anchor="e", stretch=False)
+        if not more:
+            tree.delete(*tree.get_children()); self._ld_rows = {}
+        mine_abbr = {a for _s, a in MY_TEAMS}
+        for r in result.get("rows") or []:
+            iid = tree.insert("", "end", values=[r["rank"], r["name"], r["team"], r["pos"]] + list(r["values"]), tags=(("mine",) if r["team"] in mine_abbr else ()))
+            self._ld_rows[iid] = r
+        n = len(self._ld_rows)
+        self._ld_status.config(text=(result.get("msg") or f"{n} players") if n == 0 or result.get("msg") else f"{n} players")
+    def _on_leaders_click(self, event):
+        try:
+            iid = self._ld_tree.identify_row(event.y)
+        except Exception:
+            return
+        r = self._ld_rows.get(iid); sport = self._leaders_sport()
+        if r and sport and r.get("id"):
+            self.show_player(sport, {"id": r["id"], "name": r["name"], "pos": r["pos"]}, r["team"])
     # ---- season schedule: one list of every game a league has; scroll up for future games, down for past ones ----
     def _build_season_tab(self, style):
         style.configure("SE.Treeview", background="#0A0E14", fieldbackground="#0A0E14", foreground=GUI_TEXT,
@@ -7078,9 +8659,13 @@ class SportsDashboard(tk.Toplevel):
         self._se_loading = True; self._se_status.config(text="Loading...")
         back, ahead = self._se_back, self._se_ahead
         def _do():
-            try: games = fetch_season_games(sport, back, ahead, max_age=0 if force else 120)
+            try:
+                if back > 4 or ahead > 4:               # show a week around today straight away, then fill in the rest
+                    quick = fetch_season_games(sport, min(back, 3), min(ahead, 3), max_age=0 if force else 120)
+                    self.after(0, lambda: self._finish_season(sport, quick, reset, final=False))
+                games = fetch_season_games(sport, back, ahead, max_age=0 if force else 120)
             except Exception: games = None
-            try: self.after(0, lambda: self._finish_season(sport, games, reset))
+            try: self.after(0, lambda: self._finish_season(sport, games, reset and games is None))
             except Exception: pass
         threading.Thread(target=_do, daemon=True).start()
     def _season_image(self, g):
@@ -7109,8 +8694,9 @@ class SportsDashboard(tk.Toplevel):
                 if k == key:
                     try: self._se_tree.item(iid, image=photo)
                     except Exception: pass
-    def _finish_season(self, sport, games, center):
-        self._se_loading = False
+    def _finish_season(self, sport, games, center, final=True):
+        if final:
+            self._se_loading = False
         if games is None or sport != self._season_sport():
             self._se_status.config(text="Could not load this league right now" if games is None else "")
             return
@@ -7132,7 +8718,7 @@ class SportsDashboard(tk.Toplevel):
             dt = g.get("start_dt")
             when = _fmt_clock_time(dt) if isinstance(dt, datetime.datetime) else ""
             hidden = self._scores_hidden(g)
-            score = ("•  –  •" if hidden else f"{g['away_score']} – {g['home_score']}") if g["game_state"] != "upcoming" else "vs"
+            score = ("•  –  •" if hidden else score_text(g)) if g["game_state"] != "upcoming" else "vs"
             status = _game_status_text(g) if g["game_state"] == "live" else ("Final" if g["game_state"] == "final" else "")
             if g.get("id") in WATCHING: status = "📺 Watching"
             tag = "live" if g["game_state"] == "live" else ("mine" if self._is_mine_game(g) else ("up" if g["game_state"] == "upcoming" else ""))
@@ -7208,30 +8794,55 @@ class SportsDashboard(tk.Toplevel):
             self._load_standings()
         elif sel is self._tab_season:
             self._load_season()
+        elif sel is self._tab_leaders:
+            self._open_leaders()
+        elif sel is self._tab_events:
+            self._load_events()
+        elif sel is self._tab_teams:
+            self._open_teams()
         elif sel is self._tab_history:
             self._refresh_history(force=True)
 
+    def _sync_season_combo(self, sport):
+        opts = season_options(sport)
+        if self._st_season_sport != sport:
+            try:
+                self._st_season["values"] = [l for l, _p in opts]; self._st_season.set(opts[0][0])
+            except Exception:
+                pass
+            self._st_season_sport = sport
+        self._st_season_map = dict(opts)
+    def _standings_season_param(self, sport):
+        """None for the current season, otherwise the year the drop-down picked."""
+        try:
+            label = self._st_season.get()
+        except Exception:
+            return None
+        opts = season_options(sport)
+        return None if (not label or label == opts[0][0]) else dict(opts).get(label)
     def _load_standings(self, force=False):
         self._refresh_standings_sports()
         sport = self._current_sport()
         if not sport:
             return
+        self._sync_season_combo(sport)
+        season = self._standings_season_param(sport)
         self._standings_sport = sport
         self._sync_views()
         if self._st_view == "bracket":
             self._show_st_frame("bracket"); self._load_bracket(sport, force); return
         self._show_st_frame("standings")
-        cached = self._standings_cache.get(sport)
+        cached = self._standings_cache.get((sport, season))
         if cached and not force and time.time() - cached[0] < int(opt("standings_cache_min")) * 60:
             self._render_standings(sport, cached[1]); return
         self._st_status.config(text="Loading...")
         def _do():
-            data = fetch_standings(sport)
-            self.after(0, lambda: self._store_standings(sport, data))
+            data = fetch_standings(sport, season)
+            self.after(0, lambda: self._store_standings(sport, data, season))
         threading.Thread(target=_do, daemon=True).start()
-    def _store_standings(self, sport, data):
-        self._standings_cache[sport] = (time.time(), data)
-        if sport == self._standings_sport and self._st_view == "standings":
+    def _store_standings(self, sport, data, season=None):
+        self._standings_cache[(sport, season)] = (time.time(), data)
+        if sport == self._standings_sport and self._st_view == "standings" and season == self._standings_season_param(sport):
             self._render_standings(sport, data)
     def _on_standings_search(self):
         if self._st_current:
@@ -7245,6 +8856,8 @@ class SportsDashboard(tk.Toplevel):
         for sp in keys:
             label = _ALL_SPORTS_GUI.get(sp, sp)
             names[label if label not in names else f"{label} ({sp})"] = sp
+        if opt("ev_f1"):
+            names["Formula 1 (Drivers & Constructors)"] = "f1"; keys.append("f1")
         self._st_sports = keys; self._st_names = names
         try:
             self._st_combo["values"] = list(names)
@@ -7253,7 +8866,7 @@ class SportsDashboard(tk.Toplevel):
         except Exception:
             pass
     def _on_standings_click(self, event):
-        """Click a team in the standings: open its page (record, place in the division, every game this season)."""
+        """Click a team in the standings: open its page (record, place in the division, every game this season); a Formula 1 driver / constructor opens its history."""
         try:
             iid = self._st_tree.identify_row(event.y)
         except Exception:
@@ -7262,8 +8875,12 @@ class SportsDashboard(tk.Toplevel):
         if not ctx:
             return
         sport, row = ctx
+        if sport == "f1":
+            if row.get("entity") and row.get("id"):
+                self.show_f1_entity(row["entity"], row["id"], row.get("name", ""))
+            return
         data = self._st_current[1] if self._st_current else {}
-        self.show_team_page(sport, row, team_standing_text(data, row.get("id")))
+        self.show_team_page(sport, row, team_standing_text(data, row.get("id")), self._standings_season_param(sport))
     def _render_standings(self, sport, data):
         tree = self._st_tree
         tree.delete(*tree.get_children())
@@ -7664,6 +9281,20 @@ def _wheel_notches(event):
     if not d: return 0
     n = max(1, abs(int(d)) // 120)
     return -n if d > 0 else n
+def split_toolbar(top):
+    """A crowded toolbar: the controls packed on its right (buttons, status, search) move onto a second line, so nothing overlaps."""
+    try:
+        kids = top.pack_slaves()
+        rights = [w for w in kids if w.pack_info().get("side") == "right"]
+        if len(rights) < 2 or not kids:
+            return None
+        bar2 = tk.Frame(top, bg=top.cget("bg")); bar2.pack(side="bottom", fill="x", before=kids[0])
+        for w in rights:
+            info = w.pack_info(); w.pack_forget()
+            w.pack(in_=bar2, side="right", padx=info.get("padx", 3), pady=info.get("pady", 0), fill=info.get("fill", "none"), expand=info.get("expand", 0))
+        return bar2
+    except Exception:
+        return None
 def install_global_scroll(root):
     """One handler for the whole app: the wheel scrolls whatever scrollable page is under the pointer
     (cards, labels and empty space included). Shift+wheel scrolls sideways."""
@@ -7743,6 +9374,21 @@ def _restart_app(root):
     if quit_fn: quit_fn()
     else: os._exit(0)
 # ---- auto-generated settings tabs (one per option group in the OPTIONS REGISTRY) ----
+class _FlagsVar:
+    """The value holder for a checklist setting: get() -> list of ticked flags, set(list)."""
+    def __init__(self, parent, choices, current, bg):
+        self.choices = list(choices); self.vars = {}
+        box = tk.Frame(parent, bg=bg); box.pack(side="left", padx=4, pady=2)
+        for i, (flag, label) in enumerate(self.choices):
+            v = tk.BooleanVar(value=flag in (current or []))
+            self.vars[flag] = v
+            tk.Checkbutton(box, text=label, variable=v, font=(UI_FONT, _fs(9)), fg="#CCCCCC", bg=bg, selectcolor=GUI_BG, activebackground=bg,
+                           activeforeground="#FFFFFF", anchor="w").grid(row=i // 2, column=i % 2, sticky="w", padx=6)
+    def get(self):
+        return [f for f, _l in self.choices if self.vars[f].get()]
+    def set(self, flags):
+        for f, v in self.vars.items():
+            v.set(f in (flags or []))
 def _build_option_tab(nb, win, tab_title, group, intro="", top_extra=None, bottom_extra=None, on_saved=None,
                       overrides=None):
     """Build a Settings tab for every add_option(...) in `group`. Returns the tab frame."""
@@ -7766,9 +9412,9 @@ def _build_option_tab(nb, win, tab_title, group, intro="", top_extra=None, botto
         top_extra(body)
     defs = [d for d in OPTION_DEFS if d["group"] == group]
     vars_ = {}; secret_entries = []
-    for i, d in enumerate(defs):
+    def _add_row(parent, i, d):
         row_bg = GUI_PANEL if i % 2 == 0 else GUI_BG
-        row = tk.Frame(body, bg=row_bg); row.pack(fill="x")
+        row = tk.Frame(parent, bg=row_bg); row.pack(fill="x")
         cur = (overrides or {}).get(d["key"], opt(d["key"]))
         kind = d["kind"]
         if kind == "bool":
@@ -7779,7 +9425,9 @@ def _build_option_tab(nb, win, tab_title, group, intro="", top_extra=None, botto
         else:
             tk.Label(row, text=d["label"], font=(UI_FONT, _fs(10)), fg="#CCCCCC", bg=row_bg, anchor="w",
                      width=46).pack(side="left", padx=8, pady=4)
-            if kind in ("int", "float"):
+            if kind == "flags":
+                var = _FlagsVar(row, d["choices"], cur, row_bg)
+            elif kind in ("int", "float"):
                 var = tk.StringVar(value=str(cur))
                 tk.Spinbox(row, from_=d["lo"], to=d["hi"], increment=(1 if kind == "int" else 0.1),
                            textvariable=var, width=8, font=(UI_FONT, _fs(10)), bg=GUI_BG, fg="#FFFFFF",
@@ -7801,6 +9449,22 @@ def _build_option_tab(nb, win, tab_title, group, intro="", top_extra=None, botto
         if d["hint"]:
             tk.Label(row, text=d["hint"], font=(UI_FONT, _fs(8)), fg="#555555", bg=row_bg).pack(side="left", padx=8)
         vars_[d["key"]] = var
+    normal = [d for d in defs if not d.get("advanced")]; adv = [d for d in defs if d.get("advanced")]
+    if not normal:                                     # a tab of nothing but advanced settings just shows them
+        normal, adv = adv, []
+    for i, d in enumerate(normal):
+        _add_row(body, i, d)
+    if adv:
+        adv_frame = tk.Frame(body, bg=GUI_BG); shown = [False]
+        tog = tk.Button(body, font=(UI_FONT, _fs(9)), fg=GUI_MUTED, bg=GUI_PANEL, relief="flat", cursor="hand2", anchor="w", padx=10, pady=5)
+        def _toggle_adv():
+            shown[0] = not shown[0]
+            if shown[0]: adv_frame.pack(fill="x")
+            else: adv_frame.pack_forget()
+            tog.config(text=(f"▾  Hide the {len(adv)} advanced settings" if shown[0] else f"▸  Show {len(adv)} advanced settings (rarely needed)"))
+        tog.config(command=_toggle_adv); tog.pack(fill="x", padx=8, pady=8); _toggle_adv(); _toggle_adv()
+        for i, d in enumerate(adv):
+            _add_row(adv_frame, i, d)
     if secret_entries:
         show_var = tk.BooleanVar(value=False)
         def _toggle():
@@ -7842,6 +9506,7 @@ def _build_option_tab(nb, win, tab_title, group, intro="", top_extra=None, botto
         for d in defs:
             v = vars_[d["key"]]; dv = d["default"]
             if d["kind"] == "bool": v.set(bool(dv))
+            elif d["kind"] == "flags": v.set(list(dv))
             elif d["kind"] == "choice": v.set(next((l for val, l in d["choices"] if val == dv), str(dv)))
             else: v.set(str(dv))
     tk.Button(save_bar, text="↺  Reset this tab to defaults (then press Save)", command=_defaults,
@@ -8081,11 +9746,13 @@ def _build_option_tabs(nb, win, root):
     _build_sport_order_tab(inner, win, root)
     _build_option_tab(inner, win, "Alerts", "Alerts",
                       intro="Choose which alerts you get. Everything here applies immediately.")
+    _build_option_tab(inner, win, "Racing & Events", "Racing & Events",
+                      intro="Formula 1 (and other racing, golf, tennis, UFC): alerts before a session starts, when it starts and when it finishes. The Events tab shows the schedule.")
     _build_option_tab(inner, win, "Quiet Hours", "Quiet Hours", top_extra=_snooze_controls,
                       intro="Mute popups on a schedule, or snooze right now. Muted alerts still appear in the History tab.")
     _build_team_alerts_tab(inner, win)
     _build_option_tab(inner, win, "Popups", "Popups", on_saved=_after_visuals,
-                      intro="How popups, the screen flash and the green dot behave.")
+                      intro="How popups, the screen flash and the green dot behave, plus the OBS overlay window (the 📺 button on the dashboard).")
     _build_option_tab(inner, win, "Popup Card", "Popup Card", on_saved=_after_visuals,
                       intro="The look of the popup card itself: colors, fonts, size, shape, shadow and dot colors. Applies to the next popup.")
     _build_option_tab(inner, win, "Game Details", "Game Details", on_saved=_after_visuals,
@@ -8101,11 +9768,9 @@ def _build_option_tabs(nb, win, root):
     _build_option_tab(inner, win, "Phone", "Phone", top_extra=_phone_help,
                       bottom_extra=lambda parent, save_silent: _phone_test_button(parent, save_silent, win),
                       intro="Send alerts to your phone or any webhook. Nothing is sent until you turn it on.")
-    _build_option_tab(inner, win, "Timing", "Timing", on_saved=_after_visuals,
-                      intro="Speeds, delays, network timeouts and how far back/ahead the dashboard looks.")
     _build_option_tab(inner, win, "System", "System", on_saved=_after_system, top_extra=lambda body: _system_tools(body, win, root),
                       overrides={"autostart": is_autostart_enabled()},
-                      intro="Startup, shortcuts and always-on-top behavior.")
+                      intro="Startup, shortcuts, always-on-top behavior and (under Advanced) speeds, delays and network timeouts.")
 def _build_sports_tab(nb, win, root):
     """Every league ESPN offers, in sections (the major leagues first), with a search box. All are ticked by default."""
     tab = tk.Frame(nb, bg=GUI_BG); nb.add(tab, text="  Sports  ")
@@ -8518,7 +10183,7 @@ def show_upcoming_games_window(root):
     win.geometry("520x500"); win.attributes("-topmost",True)
     _upcoming_win_ref[0] = win
     hdr = tk.Frame(win, bg=GUI_PANEL, pady=10); hdr.pack(fill="x")
-    tk.Label(hdr, text="🏟  MY TEAMS — NEXT GAMES", font=(UI_FONT, _fs(12),"bold"),
+    tk.Label(hdr, text="MY TEAMS — NEXT GAMES", font=(UI_FONT, _fs(12),"bold"),
              fg=GUI_GREEN, bg=GUI_PANEL).pack(side="left", padx=16)
     ref_btn = tk.Button(hdr, text="⟳", font=(UI_FONT, _fs(10)), fg=GUI_MUTED, bg=GUI_PANEL,
                         relief="flat", cursor="hand2"); ref_btn.pack(side="right",padx=12)
@@ -8632,7 +10297,7 @@ class StatusDot:
             except Exception: pass
         else: self._open_dashboard()
     def _apply_visibility(self):
-        hide = bool(opt("dot_hide_idle")) and self.count == 0
+        hide = bool(opt("dot_hidden")) or (bool(opt("dot_hide_idle")) and self.count == 0)
         try:
             if hide and not self._hidden:
                 self.win.withdraw(); self._hidden = True
@@ -8831,7 +10496,7 @@ class App:
             "live":True,"game_state":"live","status_name":"STATUS_IN_PROGRESS","status_desc":"","situation":{},
         }
         self.pm.show(fake,
-                     "Sports Tracker v22  |  Click green dot = Dashboard  |  Right-click = My Teams  |  Hold Enter 3s = Pause/Resume Popups",
+                     "Sports Tracker v24  |  Click green dot = Dashboard  |  Right-click = My Teams  |  Hold Enter 3s = Pause/Resume Popups",
                      None,"👋","WELCOME","nfl")
     def _quit(self):
         if self._shutting_down: return
@@ -9051,7 +10716,10 @@ def _run_sanity_tests_unsafe():
         globals()["_selected_monitor_rect"] = _orig_rect
     # ---- new features: options, quiet hours, snooze, close games, per-team levels, phone, standings ----
     def _set_opts(**kw):
-        old = dict(_CONFIG.get("opts", {})); _CONFIG.setdefault("opts", {}).update(kw); return old
+        old = dict(_CONFIG.get("opts", {}))
+        for _k, _v in kw.items():
+            set_opt(_k, _v)
+        return old
     def _restore_opts(old):
         _CONFIG["opts"] = old
     _check("opts default seconds", _sanitize_config({})["opts"]["popup_seconds"] == 8)
@@ -9060,7 +10728,7 @@ def _run_sanity_tests_unsafe():
     _check("opts bad time -> default", _coerce_option(OPTION_BY_KEY["quiet_start"], "25:99") == "23:00")
     _check("opts time normalised", _coerce_option(OPTION_BY_KEY["quiet_start"], "7:05") == "07:05")
     _check("opts bad choice -> default", _coerce_option(OPTION_BY_KEY["dot_left_click"], "nope") == "dashboard")
-    _check("opts bool from text", _coerce_option(OPTION_BY_KEY["alert_scores"], "off") is False)
+    _check("opts bool from text", _coerce_option(OPTION_BY_KEY["dash_mine_only"], "off") is False)
     _check("opts every default valid", all(_coerce_option(d, d["default"]) == d["default"] for d in OPTION_DEFS))
     _check("opts groups present", {"Alerts", "Quiet Hours", "Popups", "Dashboard", "Phone", "System"} <= set(OPTION_GROUPS))
     _check("team alerts sanitised", _sanitize_config({"team_alerts": {"nfl:phi": "off", "nfl:dal": "bogus"}})["team_alerts"] == {"nfl:PHI": "off"})
@@ -9167,11 +10835,11 @@ def _run_sanity_tests_unsafe():
     _check("labels default", score_label("nfl", 6) == ("🏈", "TOUCHDOWN") and _label_pair("start") == ("⏰", "STARTING SOON"))
     _old_o2 = dict(_CONFIG.get("opts", {}))
     try:
-        _CONFIG.setdefault("opts", {}).update(label_fb_td="TD!!", icon_fb_td="🔥", snooze_2=90)
+        _CONFIG.setdefault("opts", {}).update(lbl_fb_td="🔥 TD!!", snooze_presets="30, 90, 120, 240")
         apply_options()
         _check("label override", score_label("nfl", 6) == ("🔥", "TD!!"))
         _check("snooze presets", SNOOZE_CHOICES[1] == ("90 minutes", 90) and SNOOZE_CHOICES[0] == ("30 minutes", 30))
-        _CONFIG["opts"]["label_fb_td"] = ""
+        _CONFIG["opts"]["lbl_fb_td"] = ""
         _check("blank label falls back", score_label("nfl", 6)[1] == "TOUCHDOWN")
     finally:
         _CONFIG["opts"] = _old_o2; apply_options()
@@ -9182,7 +10850,7 @@ def _run_sanity_tests_unsafe():
     try:
         _CONFIG["sport_colors"] = {"nfl": ["#010203", "#040506", "#070809"]}
         _CONFIG.setdefault("opts", {}).update(popup_width=520, logo_size=60, color_bg="#101010", ui_font="Verdana",
-                                              nba_alert_q1=False, final_days_back=2)
+                                              nba_period_alerts=["half", "q3"], final_days_back=2)
         apply_options()
         _check("sport color override applied", THEME["nfl"] == ("#010203", "#040506", "#070809"))
         _check("popup width applied", POPUP_W == 520)
@@ -9238,9 +10906,9 @@ def _run_sanity_tests_unsafe():
     _old_o3 = dict(_CONFIG.get("opts", {}))
     _real_fetch = globals()["fetch_play_summary"]
     try:
-        _CONFIG.setdefault("opts", {}).update(play_detail_baseball=False)
+        set_opt("play_detail_baseball", False)
         _check("play toggle per sport", not play_detail_supported("mlb") and play_detail_supported("nfl"))
-        _CONFIG["opts"]["play_detail_baseball"] = True
+        set_opt("play_detail_baseball", True)
         _calls = []
         def _fake(sport, gid, max_age=1.5):
             _calls.append(1)
@@ -9713,7 +11381,7 @@ def _run_sanity_tests_unsafe():
     _check("zones: leagues with no playoffs and no zones: just the leader in gold", [standing_color_key("nsl", "table", r, 8) for r in (1, 2, 8)] == ["gold", "plain", "plain"])
     _check("zones: standings rows carry ESPN's note", _standings_row({"team": {"abbreviation": "ARS"}, "note": {"description": "Champions League"}, "stats": []})["note"] == "Champions League")
     _check("zones: all fills defined", all(k in STANDING_FILLS for k, _l in ZONE_LEGEND))
-    _check("version 22 with a history back to V1", "v22" in __doc__ and "V22  " in __doc__ and "V21  " in __doc__ and "V1   " in __doc__ and "reconstructed" in __doc__)
+    _check("version 24 with a history back to V1", "v24" in __doc__ and "V24  " in __doc__ and "V23  " in __doc__ and "V1   " in __doc__ and "reconstructed" in __doc__)
     # ---- mouse wheel, closing the dashboard, Canadian Championship (FotMob) ----
     class _W:
         def __init__(self, cls, master=None, y=(0.0, 1.0), x=(0.0, 1.0)):
@@ -10340,20 +12008,20 @@ def _run_sanity_tests_unsafe():
         if _bsport in SPORT_KIND:
             _ptb.handle_score_event({"id": f"bb-{_bsport}", "sport": _bsport, "home_abbr": "H", "away_abbr": "A", "home_name": "H", "away_name": "A", "home_score": 2, "away_score": 0, "game_state": "live", "period": 1, "clock": "9:00"}, "home", 2, 0, 0, 0, 2)
     _check("basketball: a basket in NBA / WNBA / college makes no popup", _pmb.shown == [])
-    _CONFIG.setdefault("opts", {})["alert_basketball_scores"] = True
+    set_opt("alert_basketball_scores", True)
     _ptb.handle_score_event({"id": "bb-on", "sport": "nba", "home_abbr": "H", "away_abbr": "A", "home_name": "H", "away_name": "A", "home_score": 2, "away_score": 0, "game_state": "live", "period": 1, "clock": "9:00"}, "home", 2, 0, 0, 0, 2)
     _check("basketball: the option brings them back", len(_pmb.shown) == 1)
-    _CONFIG["opts"]["alert_basketball_scores"] = False
+    set_opt("alert_basketball_scores", False)
     _check("college basketball is played in halves", period_str("mens-college-basketball", 1) == "1H" and period_str("mens-college-basketball", 2) == "2H" and period_str("mens-college-basketball", 3) == "OT"
            and period_str("nba", 1) == "Q1" and period_str("womens-college-basketball", 4) == "OT2")
     _check("plays are labelled 1H / 2H in college basketball, Q1 / Q2 in the NBA", _format_play({"text": "x", "period": {"number": 2}, "clock": {"displayValue": "9:10"}}, "basketball", True)["time"] == "2H 9:10"
            and _format_play({"text": "x", "period": {"number": 2}, "clock": {"displayValue": "9:10"}}, "basketball")["time"] == "Q2 9:10")
     _many = [{"id": str(i), "text": f"play {i}", "period": {"number": 1}, "clock": {"displayValue": f"{20 - i // 10}:00"}} for i in range(300)]
     _dd = parse_game_detail({"plays": _many}, {"sport": "nhl"})
-    _check("play-by-play: all 300 plays are kept, newest first, down to the very first", len(_dd["feed"]) == 300 and _dd["feed"][-1]["text"] == "play 0" and opt("detail_feed_max") == 0)
-    _CONFIG["opts"]["detail_feed_max"] = 50
+    _check("play-by-play: all 300 plays are kept, newest first, down to the very first", len(_dd["feed"]) == 300 and _dd["feed"][-1]["text"] == "play 0" and opt("detail_feed_limit") == 0)
+    _CONFIG["opts"]["detail_feed_limit"] = 50
     _check("play-by-play: a limit can still be set", len(parse_game_detail({"plays": _many}, {"sport": "nhl"})["feed"]) == 50)
-    _CONFIG["opts"]["detail_feed_max"] = 0
+    _CONFIG["opts"]["detail_feed_limit"] = 0
     _real_jg6 = globals()["json_get"]; _FULLPLAYS_CACHE.clear()
     _have = [{"id": str(i), "text": f"p{i}", "sequenceNumber": str(i)} for i in range(100, 130)]
     _full_items = [{"id": str(i), "text": f"p{i}", "sequenceNumber": str(i)} for i in range(0, 130)]
@@ -10389,7 +12057,9 @@ def _run_sanity_tests_unsafe():
         globals()["json_get"] = lambda url, *a, **k: (_u7.append(url), None)[1]
         _TEAM_CACHE.clear(); _ROSTER_CACHE.clear()
         fetch_team_schedule("nfl", "21", season=2023); fetch_team_roster("nfl", "21", season=2023); fetch_team_stats("nfl", "21", season=2023)
-        _check("past seasons: schedule, roster and team stats ask ESPN for that season", len(_u7) == 3 and all(u.endswith("?season=2023") for u in _u7))
+        _check("past seasons: schedule, roster and team stats ask ESPN for that season (the per-season player list first, the usual roster as backup)",
+               sum(u.endswith("?season=2023") for u in _u7) == 3 and any("/seasons/2023/teams/21/athletes" in u for u in _u7) and any(u.endswith("/roster?season=2023") for u in _u7)
+               and any(u.endswith("/schedule?season=2023") for u in _u7) and any(u.endswith("/statistics?season=2023") for u in _u7))
         _u7.clear(); fetch_standings("nfl", 2023)
         _check("past seasons: standings ask ESPN for that season (every attempt)", _u7 and all("season=2023" in u for u in _u7))
         _u7.clear(); fetch_standings("nfl")
@@ -10397,7 +12067,9 @@ def _run_sanity_tests_unsafe():
         _u7.clear(); fetch_leaders("nfl", season=2023, category="passing", stat="passingYards")
         _check("leaders: the request names the season and what to sort by", len(_u7) == 1 and "/football/nfl/statistics/byathlete" in _u7[0] and "season=2023" in _u7[0] and "sort=passing.passingYards:desc" in _u7[0])
         _u7.clear()
-        _check("leaders: soccer / external leagues make no ESPN request", fetch_leaders("pl")["rows"] == [] and fetch_leaders("cpl")["rows"] == [] and _u7 == [])
+        _check("leaders: external leagues make no ESPN request", fetch_leaders("cpl")["rows"] == [] and _u7 == [])
+        fetch_leaders("pl", season=2025)
+        _check("leaders: soccer comes from ESPN's core API (no key needed)", len(_u7) == 1 and "sports.core.api.espn.com/v2/sports/soccer/leagues/eng.1/seasons/2025/types/1/leaders" in _u7[0])
     finally:
         globals()["json_get"] = _real_jg7; _TEAM_CACHE.clear(); _ROSTER_CACHE.clear()
     _TEAM_INDEX["nfl"] = [("PHI", "Philadelphia Eagles", "21"), ("DAL", "Dallas Cowboys", "6")]
@@ -10453,6 +12125,359 @@ def _run_sanity_tests_unsafe():
     _check("leaders: categories, the chosen category's numbers, ranks continue across pages", [c["name"] for c in _ld["categories"]] == ["passing", "rushing"] and _ld["category"] == "rushing"
            and _ld["rows"][0]["values"] == ["10", "400"] and _ld["rows"][0]["rank"] == 51 and _ld["rows"][0]["team"] == "BUF" and _ld["rows"][1]["values"] == [])
     _check("leaders: the first category is used when none is chosen; junk is safe", parse_leaders(None)["rows"] == [] and parse_leaders({"categories": [{"name": "a", "labels": []}], "athletes": []})["category"] == "a")
+    # ---- player window layout ----
+    _cats = [{"name": "Passing", "labels": ["GP", "YDS"], "rows": [("2025  PHI", ["16", "4200"]), ("2024  DAL", ["17", "4000"]), ("Career", ["48", "11200"])]}]
+    _secs = render_player_sections(_cats, {"pos": "QB", "jersey": "1", "age": "27", "height": "6' 1\"", "weight": "223 lbs"})
+    _kinds = [k for k, _t in _secs]
+    _check("player page: THIS SEASON comes first, then the career, then About (height / weight / age last)", [t for k, t in _secs if k == "cat"] == ["THIS SEASON", "CAREER  (year and team)", "ABOUT"] and _kinds[0] == "cat")
+    _this_tbl = _secs[2][1]
+    _check("player page: this season shows only the newest season", "2025  PHI" in _this_tbl and "2024  DAL" not in _this_tbl and "Career" not in _this_tbl)
+    _career_tbl = _secs[5][1]
+    _check("player page: the career lists every season with the team abbreviation next to the year", "2025  PHI" in _career_tbl and "2024  DAL" in _career_tbl and "Career" in _career_tbl)
+    _check("player page: About has position, jersey, age, height, weight", all(x in _secs[-1][1] for x in ("Position", "QB", "Jersey", "Age", "27", "Height", "Weight", "223 lbs")))
+    _soc_cats = [{"name": "Appearances & scoring", "labels": ["Apps"], "rows": [("2025-26  CHE  Premier League", ["10"]), ("2025-26  CHE  FA Cup", ["2"]), ("2024-25  CHE  Premier League", ["37"])]}]
+    _ss = render_player_sections(_soc_cats, {"name": "Cole Palmer"}, {"height": "189 cm", "weight": "74 kg", "age": "24", "nationality": "England"})
+    _check("player page (soccer): all of this season's competitions, then every season", "FA Cup" in _ss[2][1] and "2024-25" not in _ss[2][1] and "2024-25" in _ss[5][1] and "189 cm" in _ss[-1][1] and "England" in _ss[-1][1])
+    _check("player page: no stats -> only the About block", [k for k, _t in render_player_sections([], {"pos": "QB"})] == ["cat", "table"])
+    # ---- favorite-team special alerts ----
+    _hg = {"id": "hk-1", "sport": "nhl", "home_abbr": "PHI", "away_abbr": "NYR", "home_team_id": "10", "away_team_id": "20", "home_name": "Flyers", "away_name": "Rangers",
+           "game_state": "live", "home_score": 1, "away_score": 1}
+    _pl = lambda pid, per, clk, ptype, text, team, scoring=False: {"id": pid, "period": {"number": per}, "clock": {"displayValue": clk}, "type": {"text": ptype}, "text": text, "team": {"id": team}, "scoringPlay": scoring}
+    _hp = [_pl("1", 1, "15:00", "Penalty", "Hooking (2 min)", "20"), _pl("2", 1, "14:10", "Goal", "Konecny (3) Wrist Shot", "10", True),
+           _pl("3", 2, "10:00", "Penalty", "Interference (4 min)", "10"), _pl("4", 2, "8:30", "Goal", "Zibanejad (5) Slap Shot", "20", True),
+           _pl("5", 3, "5:00", "Penalty", "Tripping (2 min)", "10")]
+    _hev, _hst, _hact = hockey_special_teams(_hp, _hg, "home")
+    _check("hockey: power play and penalty kill chances are counted for my team", _hst == {"pp_opps": 1, "pp_goals": 1, "pk_opps": 2, "pk_allowed": 1} and [e["label"] for e in _hev] == ["POWER PLAY", "PENALTY KILL", "PENALTY KILL"])
+    _check("hockey: alerts carry the stats so far", "PP 0/1" in _hev[0]["text"] and "Hooking" in _hev[0]["text"] and "PK so far" in _hev[1]["text"])
+    _check("hockey: a power-play goal on a minor penalty ends it (no second goal counted)", hockey_special_teams(_hp[:2] + [_pl("9", 1, "14:00", "Goal", "Another", "10", True)], _hg, "home")[1]["pp_goals"] == 1)
+    _check("hockey: a penalty still running is 'active' with the time left", hockey_special_teams([_pl("5", 3, "5:00", "Penalty", "Tripping (2 min)", "10"), _pl("6", 3, "4:30", "Shot", "Shot saved", "20")], _hg, "home")[2] == ("pk", 90))
+    _check("hockey: no penalties -> nothing", hockey_special_teams([_pl("1", 1, "10:00", "Faceoff", "Faceoff won", "10")], _hg, "home")[0] == [])
+    _sg = {"id": "sc-1", "sport": "pl", "home_name": "Chelsea", "away_name": "Liverpool", "home_abbr": "CHE", "away_abbr": "LIV"}
+    _sc = {"commentary": [
+        {"sequence": 1, "time": {"displayValue": "34'"}, "text": "Penalty conceded by Joe Gomez (Liverpool) after a foul in the penalty area."},
+        {"sequence": 2, "time": {"displayValue": "35'"}, "text": "Cole Palmer (Chelsea) converts the penalty with a right footed shot to the bottom left corner."},
+        {"sequence": 3, "time": {"displayValue": "70'"}, "text": "Penalty awarded to Liverpool after a handball by Reece James (Chelsea)."},
+        {"sequence": 4, "time": {"displayValue": "71'"}, "text": "Mohamed Salah (Liverpool) misses the penalty, Robert Sanchez (Chelsea) saves it!"},
+        {"sequence": 5, "time": {"displayValue": "88'"}, "text": "Reece James (Chelsea) is shown the red card."}]}
+    _sev, _sst = soccer_fav_events(_sc, _sg, ["home"])
+    _check("soccer: penalty kicks for and against my team, with what happened to them", _sst["pk_for"] == 1 and _sst["pk_for_scored"] == 1 and _sst["pk_against"] == 1 and _sst["red_cards"] == 1)
+    _check("soccer: alerts for the award, the miss / save and the red card (the goal has its own alert)", [e["label"] for e in _sev] == ["PENALTY KICK", "PENALTY KICK", "PENALTY SAVED / MISSED", "RED CARD"] or
+           sorted(e["label"] for e in _sev) == ["PENALTY KICK", "PENALTY KICK", "PENALTY SAVED / MISSED", "RED CARD"])
+    _check("soccer: ordinary commentary makes nothing", soccer_fav_events({"commentary": [{"sequence": 1, "time": {"displayValue": "5'"}, "text": "Corner, Chelsea."}]}, _sg, ["home"])[0] == [])
+    _fb = {"id": "fb-1", "sport": "nfl", "home_abbr": "PHI", "away_abbr": "DAL", "home_team_id": "21", "away_team_id": "6", "home_score": 7, "away_score": 3, "game_state": "live",
+           "situation": {"possession": "21", "isRedZone": False}}
+    _rz1, _rs = red_zone_update(None, _fb, ["home"])
+    _check("red zone: nothing before the red zone", _rz1 == [] and _rs["trips"] == 0)
+    _fb2 = dict(_fb, situation={"possession": "21", "isRedZone": True, "downDistanceText": "1st & 10 at DAL 9"})
+    _rz2, _rs2 = red_zone_update(_rs, _fb2, ["home"])
+    _check("red zone: my team gets there -> one alert with the situation and the trips so far", len(_rz2) == 1 and _rz2[0]["label"] == "RED ZONE" and "1st & 10 at DAL 9" in _rz2[0]["text"] and _rs2["trips"] == 1 and _rs2["in"])
+    _rz3, _rs3 = red_zone_update(_rs2, _fb2, ["home"])
+    _check("red zone: staying in it does not alert again", _rz3 == [] and _rs3["trips"] == 1)
+    _rz4, _rs4 = red_zone_update(_rs3, dict(_fb, home_score=14), ["home"])
+    _check("red zone: a touchdown on the trip is recorded", _rs4["td"] == 1 and _rs4["in"] is False)
+    _rz5, _rs5 = red_zone_update(_rs4, dict(_fb2, home_score=14), ["home"]); _rz6, _rs6 = red_zone_update(_rs5, dict(_fb, home_score=17), ["home"])
+    _check("red zone: second trip ends in a field goal", _rs6["trips"] == 2 and _rs6["fg"] == 1 and "1 trip" in _rz5[0]["text"])
+    _check("red zone: the other team in the red zone is not my trip", red_zone_update(None, dict(_fb, situation={"possession": "6", "isRedZone": True}), ["home"])[0] == [])
+    _tov = football_turnover_events({"plays": [{"id": "1", "text": "J.Hurts pass INTERCEPTED by T.Diggs at the DAL 30", "type": {"text": "Pass Interception Return"}},
+                                              {"id": "2", "text": "J.Hurts pass incomplete", "type": {"text": "Pass Incompletion"}}]}, _fb)
+    _check("football: turnovers are found, incompletions are not", len(_tov) == 1 and _tov[0]["label"] == "TURNOVER")
+    _bk = {"id": "bk-1", "sport": "nba", "home_abbr": "PHI", "away_abbr": "BOS", "home_score": 20, "away_score": 20}
+    _ev, _rst = run_update(None, _bk, ["home"])
+    _ev, _rst = run_update(_rst, dict(_bk, home_score=26), ["home"])
+    _check("basketball: no alert for a small run", _ev == [] and _rst["run_home"] == 6)
+    _ev, _rst = run_update(_rst, dict(_bk, home_score=32), ["home"])
+    _check("basketball: 10+ unanswered points -> run alert", len(_ev) == 1 and _ev[0]["label"] == "10-0 RUN" and "12-0" in _ev[0]["text"])
+    _ev2, _rst = run_update(_rst, dict(_bk, home_score=33), ["home"])
+    _check("basketball: the same run does not alert again until 15", _ev2 == [])
+    _ev3, _rst = run_update(_rst, dict(_bk, home_score=33, away_score=22), ["home"])
+    _ev4, _rst = run_update(_rst, dict(_bk, home_score=44, away_score=22), ["home"])
+    _check("basketball: the other team scoring resets the run, a new one alerts again", _rst["run_home"] == 11 and len(_ev4) == 1)
+    _bb = {"id": "bb-1", "sport": "mlb", "home_abbr": "PHI", "away_abbr": "NYM", "period": 5, "status_desc": "Bot 5th", "clock": "", "situation": {"onFirst": True, "onSecond": True, "onThird": True, "outs": 1}}
+    _check("baseball: bases loaded while my team bats", len(bases_loaded_events(_bb, ["home"])) == 1 and bases_loaded_events(_bb, ["away"]) == []
+           and bases_loaded_events(dict(_bb, status_desc="Top 5th"), ["home"]) == [] and bases_loaded_events(dict(_bb, situation={"onFirst": True}), ["home"]) == [])
+    class _FavPM:
+        def __init__(self): self.calls = []; self.root = type("R", (), {"after": lambda s_, ms, fn=None, *a: fn() if fn else None})()
+        def show(self, game, text, url, icon, label, sport, **k): self.calls.append((label, text))
+        def show_immediate(self, *a, **k): return None, None
+    _real_fps4 = globals()["fetch_play_summary"]; _fpm = _FavPM(); _ptf = PollThread(_fpm)
+    MY_TEAMS.add(("nhl", "PHI"))
+    try:
+        _plays_box = [list(_hp[:1])]
+        globals()["fetch_play_summary"] = lambda *a, **k: {"plays": _plays_box[0]}
+        _ptf._fav_watch([dict(_hg)])
+        _check("favorite watcher: what already happened when I start is learned, not announced", _fpm.calls == [] and _ptf._fav_state["hk-1"]["hockey"]["pp_opps"] == 1)
+        _plays_box[0] = list(_hp[:3]); _ptf._fav_state["hk-1"]["t"] = 0.0
+        _ptf._fav_watch([dict(_hg)])
+        _check("favorite watcher: a new penalty on my team -> PENALTY KILL alert", [c[0] for c in _fpm.calls] == ["PENALTY KILL"] and "Interference" in _fpm.calls[0][1])
+        _ptf._fav_state["hk-1"]["t"] = 0.0; _ptf._fav_watch([dict(_hg)])
+        _check("favorite watcher: the same penalty is never announced twice", len(_fpm.calls) == 1)
+        _check("favorite watcher: each kind can be switched off", len(_fpm.calls) == 1)
+        set_opt("fav_alert_powerplay", True); set_opt("fav_alerts_enabled", False)
+        _plays_box[0] = list(_hp) + [_pl("7", 3, "2:00", "Penalty", "Slashing (2 min)", "20")]; _ptf._fav_state["hk-1"]["t"] = 0.0; _ptf._fav_watch([dict(_hg)])
+        _check("favorite watcher: the master switch turns every favorite alert off", len(_fpm.calls) == 1)
+        set_opt("fav_alerts_enabled", True)
+        WATCHING.add("hk-1"); _plays_box[0] = list(_hp) + [_pl("8", 3, "1:00", "Penalty", "Roughing (2 min)", "20")]; _ptf._fav_state["hk-1"]["t"] = 0.0; _ptf._fav_watch([dict(_hg)])
+        _check("favorite watcher: a game I mark as watching stays silent", len(_fpm.calls) == 1)
+        WATCHING.discard("hk-1")
+        _ptf2 = PollThread(_FavPM()); _ptf2._fav_watch([dict(_hg, id="hk-other", home_abbr="BOS", away_abbr="TOR")])
+        _check("favorite watcher: games without a favorite are ignored", "hk-other" not in _ptf2._fav_state)
+    finally:
+        globals()["fetch_play_summary"] = _real_fps4; MY_TEAMS.discard(("nhl", "PHI")); WATCHING.discard("hk-1")
+        set_opt("fav_alert_powerplay", True); set_opt("fav_alerts_enabled", True)
+    _check("favorite alerts: on by default, kept at the 'key' alert level and sent to the phone", opt("fav_alerts_enabled") and "fav" in _LEVEL_KINDS["key"] and _PHONE_KIND_OPT["fav"] == "phone_fav" and _KIND_OPT["fav"] == "fav_alerts_enabled")
+    # ---- racing, tournaments, fights ----
+    _f1 = {"events": [{"id": "600", "name": "Monaco Grand Prix", "date": "2026-05-24T13:00Z", "competitions": [
+        {"id": "1", "type": {"abbreviation": "FP1"}, "date": "2026-05-22T11:30Z", "status": {"type": {"state": "post", "completed": True}},
+         "competitors": [{"order": 3, "athlete": {"displayName": "Charles Leclerc"}}, {"order": 1, "athlete": {"displayName": "Max Verstappen"}}, {"order": 2, "athlete": {"displayName": "Lando Norris"}}, {"order": 4, "athlete": {"displayName": "Other"}}]},
+        {"id": "4", "type": {"abbreviation": "Qual"}, "date": "2026-05-23T14:00Z", "status": {"type": {"state": "pre"}}},
+        {"id": "5", "type": {"abbreviation": "Race"}, "date": "2026-05-24T13:00Z", "status": {"type": {"state": "in"}}}]}]}
+    _sess = parse_event_sessions(_f1, "f1")
+    _check("racing: a race weekend becomes its sessions (practice, qualifying, race)", [x["label"] for x in _sess] == ["Practice 1", "Qualifying", "Race"] and [x["state"] for x in _sess] == ["post", "pre", "in"]
+           and _sess[0]["event"] == "Monaco Grand Prix" and _sess[2]["start"].hour == 13)
+    _check("racing: a finished session lists its top three in order, others none", _sess[0]["podium"] == ["Max Verstappen", "Lando Norris", "Charles Leclerc"] and _sess[1]["podium"] == [])
+    _check("racing: junk is safe, a tournament without sessions is one event", parse_event_sessions(None, "pga") == [] and parse_event_sessions({"events": [{"id": "1", "name": "The Masters", "date": "2026-04-09T12:00Z", "status": {"type": {"state": "pre"}}}]}, "pga")[0]["label"] == "Event")
+    _now = datetime.datetime(2026, 5, 23, 13, 50, tzinfo=datetime.timezone.utc)
+    _al, _stt = event_alerts(_sess, {s_["id"]: "pre" for s_ in _sess}, set(), _now, 15)
+    _check("racing: 10 minutes before qualifying -> 'starting soon'; the race (a day away) -> nothing", [(a["label"], a["key"]) for a in _al if a["key"].startswith("soon")] == [("QUALIFYING IN 10 MIN", "soon:f1:600:4")])
+    _check("racing: only once", event_alerts(_sess, _stt, {"soon:f1:600:4"}, _now, 15)[0] == [] or all(not a["key"].startswith("soon") for a in event_alerts(_sess, _stt, {"soon:f1:600:4"}, _now, 15)[0]))
+    _check("racing: 20 minutes out is still too early for a 15-minute alert", all(not a["key"].startswith("soon") for a in event_alerts(_sess, {}, set(), _now - datetime.timedelta(minutes=10), 15)[0]))
+    _check("racing: seen as upcoming, now live -> 'has started'; first seen already live -> no alert", [a["label"] for a in event_alerts(_sess, {"f1:600:5": "pre"}, set(), _now, 15)[0] if a["key"].startswith("start")] == ["RACE HAS STARTED"]
+           and not [a for a in event_alerts(_sess, {}, set(), _now, 15)[0] if a["key"].startswith("start")])
+    _fin = [dict(_sess[2], state="post", podium=["Max Verstappen", "Lando Norris", "Charles Leclerc"])]
+    _fa = event_alerts(_fin, {"f1:600:5": "in"}, set(), _now, 15)[0]
+    _check("racing: finished -> alert with the top three", len(_fa) == 1 and _fa[0]["label"] == "RACE FINISHED" and "1. Max Verstappen" in _fa[0]["text"] and "3. Charles Leclerc" in _fa[0]["text"])
+    _check("racing: already finished when first seen -> no alert", event_alerts(_fin, {}, set(), _now, 15)[0] == [])
+    _check("racing: each kind of alert can be switched off", event_alerts(_fin, {"f1:600:5": "in"}, set(), _now, 15, (True, True, False))[0] == []
+           and event_alerts(_sess, {"f1:600:5": "pre"}, set(), _now, 15, (False, False, True))[0] == [])
+    _check("racing: only Formula 1 is on by default", opt("ev_f1") is True and not any(opt(f"ev_{k}") for k in EVENT_SPORTS if k != "f1"))
+    _real_jg9 = globals()["json_get"]; _ev_urls = []
+    try:
+        _EVENT_CACHE.clear()
+        globals()["json_get"] = lambda url, *a, **k: (_ev_urls.append(url), _f1)[1]
+        _a1 = fetch_event_sessions("f1"); _a2 = fetch_event_sessions("f1")
+        _check("racing: one scoreboard request, cached", len(_a1) == 3 and len(_ev_urls) == 1 and "/racing/f1/scoreboard" in _ev_urls[0] and _a2 == _a1)
+        _EVENT_CACHE.clear(); globals()["json_get"] = lambda *a, **k: None
+        _check("racing: ESPN unreachable -> empty, no crash", fetch_event_sessions("f1") == [] and fetch_event_sessions("nonsense") == [])
+    finally:
+        globals()["json_get"] = _real_jg9; _EVENT_CACHE.clear()
+    _real_fes = globals()["fetch_event_sessions"]; _evpm = _FavPM(); _pte = PollThread(_evpm)
+    try:
+        _soon_sessions = [dict(_sess[1], start=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=9), state="pre")]
+        globals()["fetch_event_sessions"] = lambda key, max_age=60: _soon_sessions if key == "f1" else []
+        _pte._events_watch()
+        _check("racing watcher: a session starting soon makes one popup, then the watcher checks often", len(_evpm.calls) == 1 and "IN" in _evpm.calls[0][0] and "Qualifying" in _evpm.calls[0][1]
+               and _pte._ev_next - time.time() <= 31)
+        _pte._ev_next = 0.0; _pte._events_watch()
+        _check("racing watcher: the same alert is never repeated", len(_evpm.calls) == 1)
+        _soon_sessions[0] = dict(_soon_sessions[0], state="in"); _pte._ev_next = 0.0; _pte._events_watch()
+        _check("racing watcher: when it starts, 'has started'", len(_evpm.calls) == 2 and "STARTED" in _evpm.calls[1][0])
+        set_opt("ev_f1", False); _soon_sessions[0] = dict(_soon_sessions[0], state="post", podium=["A", "B", "C"]); _pte._ev_next = 0.0; _pte._events_watch()
+        _check("racing watcher: a series that is switched off is not watched", len(_evpm.calls) == 2)
+        set_opt("ev_f1", True)
+    finally:
+        globals()["fetch_event_sessions"] = _real_fes
+    # ---- quick changes: hidden dot, basketball overturns, no stadium emoji, shootouts, stat cleaning ----
+    _check("the green dot can be hidden completely", opt("dot_hidden") is False and "bool(opt(\"dot_hidden\")) or" in _src2)
+    _pmr = _FakePM(); _ptr = PollThread(_pmr)
+    _bk_rev = {"id": "rev-bk", "sport": "nba", "home_abbr": "H", "away_abbr": "A", "home_name": "H", "away_name": "A", "home_score": 50, "away_score": 48, "game_state": "live", "period": 2, "clock": "5:00"}
+    _ptr.handle_score_reversal(_bk_rev, "home", 1, 51, 48, 50, 48)
+    _check("basketball: an overturned score (a 1-point correction) makes no alert", _pmr.shown == [])
+    set_opt("alert_basketball_reversals", True)
+    _ptr.handle_score_reversal(dict(_bk_rev, id="rev-bk2"), "home", 1, 51, 48, 50, 48)
+    _check("basketball: ...unless the option is on", len(_pmr.shown) == 1)
+    set_opt("alert_basketball_reversals", False)
+    _pmr2 = _FakePM(); _ptr2 = PollThread(_pmr2)
+    _ptr2.handle_score_reversal(dict(_bk_rev, id="rev-hk", sport="nhl", home_score=2, away_score=1), "home", 1, 3, 1, 2, 1)
+    _check("other sports still get overturned-score alerts", len(_pmr2.shown) == 1)
+    _check("the stadium emoji is gone from the titles", "🏟" not in _src2.split("def run_sanity_tests")[0])
+    _ps = {"away_score": 1, "home_score": 1, "away_shootout_score": 3, "home_shootout_score": 5, "away_team_id": "1", "home_team_id": "2", "away_abbr": "TOT", "home_abbr": "CRY"}
+    _check("shootout: the score shows the penalties in brackets, 1 (5) – 1 (3) style", score_text(_ps) == "1 (3) – 1 (5)" and score_cell(_ps, "home") == "1 (5)" and score_text({"away_score": 2, "home_score": 1}) == "2 – 1")
+    _check("shootout: a tied game is won by the shootout, and the text says so", team_result(_ps, "2")[0] == "W" and team_result(_ps, "1")[0] == "L" and team_result_text(_ps, "2") == "W  1–1 (5–3 pens)" and team_result_text(_ps, "1") == "L  1–1 (3–5 pens)")
+    _check("shootout: an ordinary result is unchanged", team_result_text({"away_score": 2, "home_score": 1, "home_team_id": "2", "away_team_id": "1", "home_abbr": "H", "away_abbr": "A"}, "1") == "W  2–1")
+    _check("stats: no decimals on whole numbers, one decimal otherwise", [clean_stat(x) for x in ("4200.0", "7.2345", "98.44", "250.7", "1,250", "20/30", "12", "-3.0", "")] == ["4200", "7.2", "98.4", "251", "1,250", "20/30", "12", "-3", ""])
+    _check("stats: 'Own Passing' is just 'Passing'; opponent categories keep their name", [_clean_category_name(x) for x in ("Own Passing", "ownRushing", "OWN DEFENSE", "Opponent Passing", "Passing")] == ["Passing", "Rushing", "DEFENSE", "Opponent Passing", "Passing"])
+    _check("stats: team stats come out clean", parse_team_stats({"categories": [{"displayName": "Own Passing", "stats": [{"displayName": "Yards", "displayValue": "2100.0", "rank": 3}]}]}) == [("Passing", [("Yards", "2100", "#3")])])
+    _check("stats: player stats come out clean", parse_player_stats({"categories": [{"displayName": "Own Passing", "labels": ["YDS"], "statistics": [{"season": {"displayName": "2025"}, "stats": ["4200.0"]}]}]})[0]["rows"][0][1] == ["4200"])
+    _check("play-by-play: the old saved 80-play limit can no longer cap it (new setting name, default all)", "detail_feed_max" not in OPTION_BY_KEY and opt("detail_feed_limit") == 0)
+    _two = {"plays": [{"id": "x1", "text": "only this one"}], "drives": {"previous": [{"plays": [{"id": "a", "text": "p1"}, {"id": "b", "text": "p2"}, {"id": "c", "text": "p3"}]}]}}
+    _check("play-by-play: when ESPN has the plays in two places the fuller list is used", len(_all_plays_in_order(_two)) == 3 and len(_all_plays_in_order({"plays": [{"id": "a"}, {"id": "b"}]})) == 2)
+    _g_old = {"id": "old", "sport": "nhl", "game_state": "final", "start_dt": datetime.datetime(2026, 11, 1, 18, tzinfo=datetime.timezone.utc)}
+    _g_new = {"id": "new", "sport": "nhl", "game_state": "final", "start_dt": datetime.datetime(2026, 11, 1, 16, tzinfo=datetime.timezone.utc)}
+    _FINISH_TS.clear()
+    _check("final page: without a recorded finish the time is start + a typical game length", finish_time(_g_old) > finish_time(_g_new) and abs(finish_time(_g_old) - _g_old["start_dt"].timestamp() - 2.7 * 3600) < 1)
+    record_finish_times([_g_new, _g_old], {"new": {"game_state": "live"}}, now=5_000_000_000.0)
+    _check("final page: a game seen going from live to final is stamped with that moment, so the one that ended last is first", _FINISH_TS == {"new": 5_000_000_000.0} and finish_time(_g_new) > finish_time(_g_old))
+    _FINISH_TS.clear()
+    # ---- free soccer stats, core-API rosters, parallel loading ----
+    _core_calls = []
+    _stats_json = {"splits": {"categories": [{"name": "general", "displayName": "General", "stats": [{"displayName": "Appearances", "displayValue": "10", "value": 10.0}, {"displayName": "Goals", "displayValue": "4.0", "value": 4.0}]},
+                                              {"name": "offensive", "displayName": "Own Offensive", "stats": [{"displayName": "Shots", "displayValue": "31"}]}]}}
+    def _fake_core(url, *a, **k):
+        _core_calls.append(url)
+        if "/types/1/athletes/77/statistics/0" in url: return _stats_json
+        if url.endswith("/athletes/77/statistics"): return {"splits": {"categories": [{"name": "general", "displayName": "General", "stats": [{"displayName": "Appearances", "displayValue": "210"}]}]}}
+        if "/seasons/2023/teams/5/athletes" in url: return {"items": [{"$ref": f"https://core/athletes/{i}"} for i in range(1, 8)] + [{"id": "99", "fullName": "Direct Player", "jersey": "9", "position": {"abbreviation": "FW"}}]}
+        if url.startswith("https://core/athletes/"):
+            n = url.rsplit("/", 1)[1]; return {"id": n, "fullName": f"Player {n}", "jersey": n, "position": {"abbreviation": "MF"}, "age": 25}
+        if url.endswith("/types/1/leaders"):
+            return {"categories": [{"name": "goalsLeaders", "displayName": "Goals Leaders", "shortDisplayName": "Goals", "leaders": [
+                {"displayValue": "21", "value": 21.0, "athlete": {"$ref": "https://core/a/1"}, "team": {"$ref": "https://core/t/1"}},
+                {"displayValue": "17", "value": 17.0, "athlete": {"$ref": "https://core/a/2"}, "team": {"$ref": "https://core/t/2"}}]},
+                {"name": "assistsLeaders", "displayName": "Assists Leaders", "shortDisplayName": "Assists", "leaders": [{"displayValue": "9", "athlete": {"$ref": "https://core/a/2"}, "team": {"$ref": "https://core/t/2"}}]}]}
+        if url == "https://core/a/1": return {"id": "1", "displayName": "E. Haaland", "position": {"abbreviation": "F"}}
+        if url == "https://core/a/2": return {"id": "2", "displayName": "M. Salah", "position": {"abbreviation": "F"}}
+        if url == "https://core/t/1": return {"abbreviation": "MC"}
+        if url == "https://core/t/2": return {"abbreviation": "LIV"}
+        return None
+    _real_jg10 = globals()["json_get"]
+    try:
+        globals()["json_get"] = _fake_core; _REF_CACHE.clear()
+        _cs = fetch_core_player_stats("pl", "77", 2025)
+        _check("free soccer player stats: this season and the career, no key", [(c["name"], c["career"]) for c in _cs] == [("General", False), ("Offensive", False), ("General", True)]
+               and _cs[0]["rows"] == [("Appearances", ["10"]), ("Goals", ["4"])] and _cs[2]["rows"] == [("Appearances", ["210"])]
+               and any("/soccer/leagues/eng.1/seasons/2025/types/1/athletes/77/statistics/0" in u for u in _core_calls))
+        _secs = render_player_sections(_cs, {"pos": "FW", "age": "25"})
+        _check("free soccer player stats: shown as THIS SEASON, then CAREER, then About", [t for k, t in _secs if k == "cat"] == ["THIS SEASON", "CAREER", "ABOUT"] and "Goals" in _secs[2][1] and "210" in _secs[-3][1])
+        _check("free soccer player stats: nothing for unknown players / leagues without a core address", fetch_core_player_stats("pl", "") == [] and fetch_core_player_stats("cpl", "77") == [])
+        _ro = fetch_core_roster("pl", "5", 2023)
+        _check("past-season roster: the player links are followed and the direct entries kept", len(_ro) == 8 and {"Player 1", "Direct Player"} <= {a["name"] for a in _ro} and [a for a in _ro if a["name"] == "Direct Player"][0]["pos"] == "FW")
+        _n_core = len(_core_calls); fetch_core_roster("pl", "5", 2023)
+        _check("past-season roster: the followed links are cached", len(_core_calls) <= _n_core + 1)
+        _ROSTER_CACHE.clear()
+        _check("a past season's roster comes from the per-season list", len(fetch_team_roster("pl", "5", season=2023)) == 8)
+        _ld = fetch_core_soccer_leaders("pl", 2025)
+        _check("soccer leaders (free): categories, the first is chosen, names and teams resolved", [c["display"] for c in _ld["categories"]] == ["Goals", "Assists"] and _ld["category"] == "goalsLeaders"
+               and [(r["rank"], r["name"], r["team"], r["values"]) for r in _ld["rows"]] == [(1, "E. Haaland", "MC", ["21"]), (2, "M. Salah", "LIV", ["17"])])
+        _ld2 = fetch_core_soccer_leaders("pl", 2025, "assistsLeaders")
+        _check("soccer leaders (free): another category can be picked", _ld2["category"] == "assistsLeaders" and _ld2["rows"][0]["name"] == "M. Salah" and fetch_core_soccer_leaders("cpl")["rows"] == [])
+    finally:
+        globals()["json_get"] = _real_jg10; _REF_CACHE.clear(); _ROSTER_CACHE.clear()
+    import threading as _th
+    _real_tf = globals()["team_form"]; _real_fps5 = globals()["fetch_play_summary"]; _threads_seen = set()
+    def _slow_form(sport, tid, n=5):
+        _threads_seen.add(_th.get_ident()); time.sleep(0.15); return [{"game": {"id": tid}, "result": ("W", 1, 0, "X", "vs")}]
+    try:
+        globals()["team_form"] = _slow_form
+        globals()["fetch_play_summary"] = lambda *a, **k: (time.sleep(0.15), None)[1]
+        _t0 = time.time()
+        _dd = fetch_game_detail({"id": "p1", "sport": "nfl", "game_state": "upcoming", "home_team_id": "1", "away_team_id": "2"})
+        _el = time.time() - _t0
+        _check("game window: both teams' recent results load at the same time as the game (fast, still complete)", _el < 0.40 and set(_dd["form"]) == {"away", "home"} and len(_threads_seen) == 2)
+    finally:
+        globals()["team_form"] = _real_tf; globals()["fetch_play_summary"] = _real_fps5
+    # ---- margin chart, formula 1, team search, box score fallback, layout ----
+    _bg = {"id": "bb-m", "sport": "nba", "home_abbr": "CHI", "away_abbr": "BOS"}
+    _mp = lambda per, clk, h, a: {"period": {"number": per}, "clock": {"displayValue": clk}, "homeScore": h, "awayScore": a}
+    _m = margin_series([_mp(1, "10:00", 5, 2), _mp(1, "2:00", 20, 10), _mp(2, "6:00", 30, 38), _mp(3, "12:00", 30, 38), _mp(4, "0:30", 80, 70)], _bg)
+    _check("margin chart: the score difference through the game (home - away)", [d for _t, d in _m["series"]] == [0, 3, 10, -8, -8, 10] and _m["series"][0] == (0.0, 0) and _m["up"] == "home")
+    _check("margin chart: elapsed time follows the quarters (12 min each) and ends at the buzzer", abs(_m["series"][1][0] - 120) < 1 and abs(_m["series"][3][0] - (720 + 360)) < 1 and abs(_m["series"][-1][0] - (2880 - 30)) < 1)
+    _check("margin chart: a divider after each finished period, labelled", [b[1] for b in _m["bounds"]] == ["Q1", "Q2", "Q3"] and [b[0] for b in _m["bounds"]] == [720.0, 1440.0, 2160.0])
+    _ot = margin_series([_mp(5, "5:00", 90, 90), _mp(5, "1:00", 92, 90)], {"sport": "nba", "home_abbr": "H", "away_abbr": "A"})
+    _check("margin chart: overtime is 5 minutes after four quarters", abs(_ot["series"][2][0] - (2880 + 240)) < 1 and _ot["bounds"][-1] == (2880.0, "Q4"))
+    _col = margin_series([_mp(2, "10:00", 40, 30)], {"sport": "mens-college-basketball", "home_abbr": "H", "away_abbr": "A"})
+    _check("margin chart: college basketball is two 20-minute halves", abs(_col["series"][1][0] - (1200 + 600)) < 1 and basketball_period_len("mens-college-basketball") == (1200, 2) and basketball_period_len("wnba") == (600, 4))
+    MY_TEAMS.add(("nba", "BOS"))
+    _check("margin chart: my team is drawn on top when only one of the two is a favorite", margin_up_side(_bg) == "away" and margin_up_side(dict(_bg, home_abbr="BOS", away_abbr="CHI")) == "home")
+    MY_TEAMS.discard(("nba", "BOS"))
+    class _Cv:
+        def __init__(self): self.calls = []
+        def delete(self, *a): self.calls.append(("delete",))
+        def winfo_width(self): return 700
+        def winfo_height(self): return 160
+        def create_line(self, *a, **k): self.calls.append(("line", a, k))
+        def create_text(self, *a, **k): self.calls.append(("text", a, k))
+    _cv = _Cv(); draw_margin_chart(_cv, _m, _bg)
+    _texts = [c[2].get("text") for c in _cv.calls if c[0] == "text"]
+    _check("margin chart: draws the zero line, a divider per period, the team names and the final lead", sum(1 for c in _cv.calls if c[0] == "line") > 10 and "Q1" in _texts and "Q3" in _texts and "▲ CHI" in _texts and "▼ BOS" in _texts and "CHI +10" in _texts)
+    _cv2 = _Cv(); draw_margin_chart(_cv2, {"series": [(0.0, 0)], "bounds": []}, _bg)
+    _check("margin chart: before any scoring it says so", [c[2].get("text") for c in _cv2.calls if c[0] == "text"] == ["No scoring yet"])
+    _dd2 = parse_game_detail({"plays": [dict(_mp(1, "11:00", 2, 0), text="x"), dict(_mp(1, "10:00", 2, 3), text="y")]}, dict(_bg, home_name="C", away_name="B"))
+    _check("game details: basketball gets the chart data", len(_dd2.get("margin", {}).get("series", [])) == 3 and "margin" not in parse_game_detail({"plays": [{"text": "x"}]}, {"sport": "nhl"}))
+    _jg_calls = []
+    def _fake_jolpica(url, *a, **k):
+        _jg_calls.append(url)
+        if url.endswith("/driverstandings.json"): return {"MRData": {"StandingsTable": {"StandingsLists": [{"DriverStandings": [
+            {"position": "1", "points": "331.0", "wins": "8", "Driver": {"driverId": "norris", "code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructors": [{"name": "McLaren"}]},
+            {"position": "2", "points": "300", "wins": "5", "Driver": {"driverId": "max_verstappen", "code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructors": [{"name": "Red Bull"}]}]}]}}}
+        if url.endswith("/constructorstandings.json"): return {"MRData": {"StandingsTable": {"StandingsLists": [{"ConstructorStandings": [{"position": "1", "points": "600", "wins": "12", "Constructor": {"constructorId": "mclaren", "name": "McLaren"}}]}]}}}
+        if "/results/1.json" in url and "circuits/" in url: return {"MRData": {"RaceTable": {"Races": [
+            {"season": "2023", "raceName": "Monaco Grand Prix", "Results": [{"Driver": {"givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}, "Time": {"time": "1:48:51.980"}, "grid": "1"}]},
+            {"season": "2021", "raceName": "Monaco Grand Prix", "Results": [{"Driver": {"givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}, "grid": "2"}]},
+            {"season": "2019", "raceName": "Monaco Grand Prix", "Results": [{"Driver": {"givenName": "Lewis", "familyName": "Hamilton"}, "Constructor": {"name": "Mercedes"}}]}]}}}
+        if "/results/1.json" in url: return {"MRData": {"RaceTable": {"Races": [{"round": "1", "Results": [{"Driver": {"givenName": "Oscar", "familyName": "Piastri"}, "Constructor": {"name": "McLaren"}}]}]}}}
+        if url.endswith("/2025/8/results.json?limit=40"): return {"MRData": {"RaceTable": {"Races": [{"Results": [
+            {"positionText": "1", "position": "1", "Driver": {"givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}, "Time": {"time": "1:40:33.843"}, "points": "25", "grid": "1"},
+            {"positionText": "R", "position": "19", "Driver": {"givenName": "Pierre", "familyName": "Gasly"}, "Constructor": {"name": "Alpine"}, "status": "Collision", "points": "0", "grid": "12"}]}]}}}
+        if url.endswith("/2025.json") or url.endswith("/current.json"): return {"MRData": {"RaceTable": {"Races": [
+            {"season": "2025", "round": "1", "raceName": "Australian Grand Prix", "date": "2025-03-16", "time": "04:00:00Z", "Circuit": {"circuitId": "albert_park", "circuitName": "Albert Park Circuit", "Location": {"locality": "Melbourne", "country": "Australia"}},
+             "FirstPractice": {"date": "2025-03-14", "time": "01:30:00Z"}, "Qualifying": {"date": "2025-03-15", "time": "05:00:00Z"}},
+            {"season": "2025", "round": "8", "raceName": "Monaco Grand Prix", "date": "2025-05-25", "time": "13:00:00Z", "Circuit": {"circuitId": "monaco", "circuitName": "Circuit de Monaco", "Location": {"locality": "Monte-Carlo", "country": "Monaco"}}}]}}}
+        return None
+    _real_jg11 = globals()["json_get"]
+    try:
+        globals()["json_get"] = _fake_jolpica; _F1_CACHE.clear()
+        _f1s = fetch_f1_standings(2025)
+        _check("F1 standings: Drivers' and Constructors' championships", [g["name"] for g in _f1s["groups"]] == ["Drivers' Championship", "Constructors' Championship"]
+               and _f1s["groups"][0]["rows"][0]["name"] == "Lando Norris" and _f1s["groups"][0]["rows"][0]["stats"] == {"TEAM": "McLaren", "W": "8", "PTS": "331"}
+               and _f1s["groups"][1]["rows"][0]["name"] == "McLaren" and _f1s["columns"] == ["TEAM", "W", "PTS"])
+        _check("F1 standings: the standings function sends F1 to Jolpica for any season, 'current' by default", fetch_standings("f1", 2025)["groups"] and (_jg_calls[-1].count("/2025/") == 1 or "2025" in _jg_calls[-1])
+               and "current/driverstandings" in (fetch_standings("f1"), _jg_calls[-2])[1])
+        _cal = fetch_f1_calendar(2025)
+        _check("F1 calendar: every round with circuit, sessions and (for past races) the winner", [(r["round"], r["name"], r["winner"]) for r in _cal] == [(1, "Australian Grand Prix", "Oscar Piastri (McLaren)"), (8, "Monaco Grand Prix", "")]
+               and _cal[0]["circuit_id"] == "albert_park" and [x[0] for x in _cal[0]["sessions"]] == ["Practice 1", "Qualifying", "Race"] and _cal[1]["sessions"] == [("Race", "2025-05-25", "13:00:00Z")])
+        _res = fetch_f1_race_results(2025, 8)
+        _check("F1 result: classification with team, time / status and points", [(r["pos"], r["driver"], r["result"], r["points"]) for r in _res] == [("1", "Lando Norris", "1:40:33.843", "25"), ("R", "Pierre Gasly", "Collision", "0")])
+        _his = fetch_f1_history("monaco")
+        _check("F1 history: every winner at the circuit, oldest first", [(h["year"], h["driver"]) for h in _his] == [(2019, "Lewis Hamilton"), (2021, "Max Verstappen"), (2023, "Max Verstappen")])
+        _st = f1_history_stats(_his)
+        _check("F1 history: races held, years, most wins", _st["races"] == 3 and _st["first"] == 2019 and _st["last"] == 2023 and _st["top_drivers"][0] == ("Max Verstappen", 2) and _st["top_teams"][0] == ("Red Bull", 2) and f1_history_stats([]) == {})
+        _secs = build_f1_event_sections(_cal[1], _res, _his)
+        _txt = "\\n".join(t for _k, t in _secs)
+        _check("F1 event page: circuit and lap length, schedule, this year's result and the past winners", "Circuit de Monaco" in _txt and "3.337 km" in _txt and "Monte-Carlo, Monaco" in _txt and "WEEKEND SCHEDULE" in _txt
+               and "Lando Norris" in _txt and "Collision" in _txt and "PAST WINNERS AT THIS CIRCUIT" in _txt and "2023  Max Verstappen" in _txt and "3 Grands Prix here" in _txt)
+        _check("F1 event page: a future race has no result block, an unknown circuit no lap length", "RESULT" not in "\\n".join(t for _k, t in build_f1_event_sections(_cal[1], [], [])) and "Lap length" not in "\\n".join(t for _k, t in build_f1_event_sections(dict(_cal[1], circuit_id="x"), [], [])))
+    finally:
+        globals()["json_get"] = _real_jg11; _F1_CACHE.clear()
+    _check("F1 standings: the championship leader is highlighted", standing_color_key("f1", "table", 1, 20) == "gold" and standing_color_key("f1", "table", 2, 20) == "plain")
+    _check("F1 is in the standings drop-down when it is switched on", "f1" in _src2 and "Formula 1 (Drivers & Constructors)" in _src2)
+    _real_jg12 = globals()["json_get"]; _eu = []
+    try:
+        globals()["json_get"] = lambda url, *a, **k: (_eu.append(url), {"events": []})[1]; _EVENT_CACHE.clear()
+        fetch_event_sessions("pga", dates="202604"); fetch_event_sessions("pga")
+        _check("events: any month can be looked up", "/golf/pga/scoreboard?dates=202604" in _eu[0] and _eu[1].endswith("/golf/pga/scoreboard"))
+    finally:
+        globals()["json_get"] = _real_jg12; _EVENT_CACHE.clear()
+    _TEAM_INDEX.clear(); _TEAM_INDEX.update({"pl": [("CRY", "Crystal Palace", "384")], "facup": [("CRY", "Crystal Palace", "384")]})
+    _check("team search tab: the same search as the Teams settings, one row per competition", [(g["name"], [l[0] for l in g["leagues"]]) for g in search_teams("palace")] == [("Crystal Palace", ["pl", "facup"])])
+    _TEAM_INDEX.clear()
+    _real_jg13 = globals()["json_get"]; _BOX_CACHE.clear()
+    def _fake_box(url, *a, **k):
+        if "/competitors/10/roster" in url: return {"entries": [{"athlete": {"displayName": "Player A"}, "statistics": {"splits": {"categories": [{"stats": [
+            {"abbreviation": "G", "displayValue": "1"}, {"abbreviation": "A", "displayValue": "0"}, {"abbreviation": "SH", "displayValue": "4.0"}]}]}}},
+            {"athlete": {"displayName": "Bench Guy"}, "statistics": {"splits": {"categories": [{"stats": [{"abbreviation": "G", "displayValue": "0"}]}]}}}]}
+        if "/competitors/20/roster" in url: return {"entries": []}
+        return None
+    try:
+        globals()["json_get"] = _fake_box
+        _bx = fetch_core_box_players({"sport": "pl", "id": "g1", "away_team_id": "10", "home_team_id": "20", "away_abbr": "AAA", "home_abbr": "BBB"})
+        _check("box score fallback: players with something to show, per team, clean numbers", _bx == [{"team": "AAA", "categories": [{"name": "Game stats", "labels": ["G", "SH"], "rows": [("Player A", ["1", "4"])]}]}])
+    finally:
+        globals()["json_get"] = _real_jg13; _BOX_CACHE.clear()
+    class _W:
+        def __init__(self, side, parent=None): self.side = side; self.parent = parent; self.info = {"side": side, "padx": 4, "pady": 0, "fill": "none", "expand": 0}; self.moved = None
+        def pack_info(self): return dict(self.info)
+        def pack_forget(self): self.moved = "forgot"
+        def pack(self, **k): self.moved = k
+    class _Top:
+        def __init__(self, kids): self.kids = kids
+        def pack_slaves(self): return self.kids
+        def cget(self, k): return "#000"
+    _kids = [_W("left"), _W("right"), _W("right"), _W("left"), _W("right")]
+    split_toolbar(_Top(_kids))
+    _check("layout: a crowded toolbar keeps its left controls and moves the right-hand ones to a second line", [k.moved for k in (_kids[0], _kids[3])] == [None, None]
+           and all(isinstance(_kids[i].moved, dict) and _kids[i].moved["side"] == "right" and "in_" in _kids[i].moved for i in (1, 2, 4)))
+    _check("layout: a toolbar with a single right-hand control is left alone", (lambda ks: (split_toolbar(_Top(ks)), [k.moved for k in ks])[1])([_W("left"), _W("right")]) == [None, None])
+    _check("layout: the header buttons have their own line and the tabs are tighter", "hdr_btns" in _src2 and "padding=[10,8]" in _src2 and "def split_toolbar(top):" in _src2)
     return passed, failed
 # =============================================================================
 #  ENTRY POINT
@@ -10467,7 +12492,7 @@ if __name__ == "__main__":
             sys.exit(1)
     else:
         print(f"✓ All {p} self-tests passed")
-    print("Starting Sports Tracker v22...")
+    print("Starting Sports Tracker v24...")
     print("  • Main GUI window will open")
     print("  • Green dot = top-left corner (click to open dashboard)")
     print("  • Broadcast popups will overlay other windows")
