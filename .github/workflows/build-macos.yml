@@ -1,6 +1,6 @@
 name: Build macOS App
 
-on:
+on: 
   workflow_dispatch:
 
 jobs:
