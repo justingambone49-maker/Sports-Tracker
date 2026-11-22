@@ -23,13 +23,12 @@ jobs:
 
       - name: Build macOS application
         run: |
-          pyinstaller --windowed --name MyMacApp main.py
+          pyinstaller --windowed --name MyMacApp sports.py
 
-      - name: Package application
+       - name: Package application
         run: |
           cd dist
-          zip -r MyMacApp-macOS.zip MyMacApp.app
-
+               ditto -c -k --sequesterRsrc --keepParent sports.app sports-mac.zip
       - name: Upload macOS application
         uses: actions/upload-artifact@v4
         with:
